@@ -6,6 +6,7 @@ plus one snapshot right after connecting. Clients keep their list in sync from
 this stream instead of polling.
 """
 import json
+import queue
 import threading
 import time
 
@@ -20,8 +21,9 @@ if TYPE_CHECKING:
     from handlers.router import RouterHandler
 
 KEEPALIVE_S = 15
+CLIENT_QUEUE_MAX = 100       # frames buffered per client before the oldest is dropped
 
-_clients: list = []          # wfile of every connected event-stream client
+_clients: list = []          # one bounded Queue per connected event-stream client
 _lock = threading.Lock()
 
 
@@ -47,14 +49,21 @@ def broadcast(event: str, data) -> None:
     frame = _frame(event, data)
     with _lock:
         clients = list(_clients)
-    for wfile in clients:
+    for q in clients:
+        # Never block the caller (a robot login/disconnect/rename thread): just
+        # enqueue. If the client is too slow and its queue is full, drop the
+        # oldest frame - the newest snapshot supersedes it anyway.
         try:
-            wfile.write(frame)
-            wfile.flush()
-        except OSError:
-            with _lock:
-                if wfile in _clients:
-                    _clients.remove(wfile)
+            q.put_nowait(frame)
+        except queue.Full:
+            try:
+                q.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                q.put_nowait(frame)
+            except queue.Full:
+                pass
 
 
 def notify_robots_changed() -> None:
@@ -73,18 +82,22 @@ def get_events(req: "RouterHandler") -> None:
     req.send_header("Connection", "keep-alive")
     req.end_headers()
 
+    q: queue.Queue = queue.Queue(maxsize=CLIENT_QUEUE_MAX)
     with _lock:
-        _clients.append(req.wfile)
+        _clients.append(q)
     try:
         req.wfile.write(_frame("robots", robots_snapshot()))
         req.wfile.flush()
         while True:
-            time.sleep(KEEPALIVE_S)
-            req.wfile.write(b": keepalive\n\n")
+            try:
+                frame = q.get(timeout=KEEPALIVE_S)
+            except queue.Empty:
+                frame = b": keepalive\n\n"
+            req.wfile.write(frame)
             req.wfile.flush()
     except OSError:
         pass  # client went away (reload, tab closed, phone in background)
     finally:
         with _lock:
-            if req.wfile in _clients:
-                _clients.remove(req.wfile)
+            if q in _clients:
+                _clients.remove(q)

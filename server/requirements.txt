@@ -6,4 +6,4 @@ numpy==2.4.6
 pillow==12.2.0
 SQLAlchemy==2.0.50
 typing_extensions==4.15.0
-zeroconf
+zeroconf==0.151.3

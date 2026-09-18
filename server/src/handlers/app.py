@@ -1,6 +1,6 @@
 from gen3.commands import send_chunk, build_command, build_heartbeat # TODO
-from state import robot_connections, client_connections, pending_requests
-from handlers.events import robots_snapshot, notify_robots_changed
+from state import robot_connections, client_connections, pending_requests, PendingRequest
+from handlers.events import robots_snapshot, notify_robots_changed, CLIENT_QUEUE_MAX
 from db import get_session, db_commit
 from models.persistent_map import Boundary, FloorPlan, PersistentMap
 from models.robot import Robot
@@ -8,6 +8,7 @@ from models.run import Gen4__Run, Run
 from sqlalchemy import select, update
 from utils import Generation, get_robot_by_serial
 import json
+import queue
 import time
 
 # Longest wait for a robot to answer a command before the HTTP request fails
@@ -243,22 +244,25 @@ def connect_robot(req: RouterHandler, serial: str) -> None:
     req.send_header("Connection", "keep-alive")
     req.end_headers()
 
-    conn = {"client": "test", "serial": serial, "wfile": req.wfile}
+    q: queue.Queue = queue.Queue(maxsize=CLIENT_QUEUE_MAX)
+    conn = {"client": "test", "serial": serial, "queue": q}
     client_connections.append(conn)
 
     try:
         while True:
-            # Heartbeat every 15 seconds
-            req.wfile.write(b": keepalive\n\n")
+            try:
+                frame = q.get(timeout=15)
+            except queue.Empty:
+                frame = b": keepalive\n\n"
+            req.wfile.write(frame)
             req.wfile.flush()
 
-            time.sleep(15)
-
-    except (BrokenPipeError, ConnectionResetError):
+    except (BrokenPipeError, ConnectionResetError, OSError):
         print(f"Client disconnected: {serial}")
 
     finally:
-        client_connections.remove(conn)
+        if conn in client_connections:
+            client_connections.remove(conn)
 
     # # try:
     # msg = json.dumps({
@@ -276,6 +280,16 @@ def connect_robot(req: RouterHandler, serial: str) -> None:
     # #         client_connections.remove(conn)
 
 
+def _send_quietly(write):
+    # Run a client-socket write; swallow the error if the client already hung up.
+    # A vanished browser shouldn't become a noisy traceback - and now that replies
+    # are delivered from this handler thread, it can't affect anything else either.
+    try:
+        write()
+    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+        pass
+
+
 def post_robot_command(req: RouterHandler, serial: str) -> None:
     """POST /robots/{serial}/command - send command to robot"""
     if not (data := req.read_json()): return
@@ -289,35 +303,37 @@ def post_robot_command(req: RouterHandler, serial: str) -> None:
         return
 
     conn = robot_connections[serial]
+    slot = PendingRequest()
     if (conn.gen == Generation.GEN4):
-        # gen4
-        req_id = robot_send_request(conn, data)
-        pending_requests[str(req_id)] = req
+        # robot_send_request registers the slot BEFORE it sends, so a fast reply
+        # can't be dropped (see gen4/handlers.py).
+        try:
+            req_id = robot_send_request(conn, data, slot)
+        except Exception:
+            _send_quietly(lambda: req.send_error_response(502, "Failed to send command to robot"))
+            return
     elif (conn.gen == Generation.GEN3):
         req_id, msg = build_command(serial, data)
-        pending_requests[str(req_id)] = req
-
-        conn = robot_connections[serial]
-        if conn:
-            try:
-                send_chunk(conn.conn.wfile, msg) # TODO
-            except Exception:
-                pass
+        pending_requests[str(req_id)] = slot  # register before sending
+        try:
+            send_chunk(conn.conn.wfile, msg) # TODO
+        except Exception:
+            pending_requests.pop(str(req_id), None)
+            _send_quietly(lambda: req.send_error_response(502, "Failed to send command to robot"))
+            return
     else:
         req.send_bad_request("Unsupported robot generation")
         return
 
-    # The reply is written by the robot's thread (robot_response) through
-    # pending_requests. Keep this handler alive until that has happened:
-    # returning earlier lets the HTTP server close the socket when the client
-    # sent "Connection: close" - which every proxy in front of the API does
-    # (Vite dev server, nginx, Caddy) - before the reply exists.
+    # The robot's receive thread fills `slot` and sets its event - it never
+    # touches this client socket. We wait here and do the write ourselves, so a
+    # slow or vanished client can only ever affect this one request, never the
+    # robot connection or other commands. (This also replaces the old busy-wait.)
     key = str(req_id)
-    deadline = time.monotonic() + COMMAND_TIMEOUT_S
-    while key in pending_requests:
-        if time.monotonic() > deadline:
-            pending_requests.pop(key, None)
-            req.send_error_response(504, "Robot did not answer in time")
-            return
-        time.sleep(0.02)
+    slot.event.wait(COMMAND_TIMEOUT_S)
+    pending_requests.pop(key, None)
+    if slot.event.is_set():
+        _send_quietly(lambda: req.send_response_data(slot.content, True, slot.status))
+    else:
+        _send_quietly(lambda: req.send_error_response(504, "Robot did not answer in time"))
     

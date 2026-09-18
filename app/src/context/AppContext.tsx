@@ -61,7 +61,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
         Http.setLoadingStateCallback(setLoadingState)
     }, [])
 
+    // True while a connect attempt is in flight (manual pick or auto-select), so
+    // the auto-select effect below can't override the choice while `robot` is
+    // briefly undefined. Cleared when a robot is set, or here if the fetch fails.
+    const connectingRef = useRef(false)
+
     const connectToRobot = (serial: string, type: RobotType, name: string) => {
+        connectingRef.current = true
         setRobot(undefined)
 
         if (type === RobotType.NeatoGen3) {
@@ -77,6 +83,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
                     state: res.data.state,
                     action: res.data.action,
                 })
+            }).catch((err) => {
+                console.error('Failed to connect to robot', err)
+                connectingRef.current = false
             })
         } else if (type === RobotType.NeatoGen4) {
             GEN4_COMMANDS.getRobotState(serial).then((res) => {
@@ -91,6 +100,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
                     state: body.state,
                     action: body.action,
                 })
+            }).catch((err) => {
+                console.error('Failed to connect to robot', err)
+                connectingRef.current = false
             })
         }
     }
@@ -158,7 +170,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     // Nothing selected yet (first load, or all robots were offline): select the
     // first robot that is online. A selected robot that goes offline stays
     // selected, with its last known state, until it comes back.
-    const connectingRef = useRef(false)
     useEffect(() => {
         if (robot || !robots || connectingRef.current) return
         const firstOnline = Object.entries(robots).find(([, info]) => info.connected)

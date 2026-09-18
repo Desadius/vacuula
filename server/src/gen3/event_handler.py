@@ -1,5 +1,6 @@
 import state
 import json
+import queue
 import time
 from state import pending_requests
 import typing
@@ -39,14 +40,12 @@ def robot_data(serial: str, data: bytes):
     reqId = decoded.get("reqId")
 
     if reqId in pending_requests:
-        req: RouterHandler = pending_requests[reqId]
+        # Fill the waiting slot; the HTTP handler thread writes to its own client
+        # socket (this is the robot's receive thread - it must not write there).
+        slot = pending_requests.get(reqId)
         result = decoded.get("result")
-        if (result == "ok"):
-            req.send_ok(data)
-        else:
-            req.send_response_data(data, True, 400)
-
-        del pending_requests[reqId]
+        if slot is not None:
+            slot.fulfill(data, 200 if result == "ok" else 400)
     elif eventId:
         print(f">> event {eventId} from {serial}")
         # broadcast to all clients subscribed to this robot
@@ -65,9 +64,20 @@ def robot_data(serial: str, data: bytes):
                 }) + "\n"
 
                 event_data = f"data: {msg}\n\n"
+                frame = event_data.encode()
 
-                client["wfile"].write(event_data.encode())
-                client["wfile"].flush()
+                q = client["queue"]
+                try:
+                    q.put_nowait(frame)
+                except queue.Full:
+                    try:
+                        q.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        q.put_nowait(frame)
+                    except queue.Full:
+                        pass
 
             except Exception as e:
                 print(

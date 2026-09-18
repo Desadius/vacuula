@@ -11,6 +11,10 @@ from gen4.handlers import handle_login, robot_response, heartbeat_thread, robot_
 
 HOST = "0.0.0.0"
 PORT = 3443
+# Bound blocking socket ops on the robot connection. recv() just retries on
+# timeout (see recv_packet); a send() to a dead robot then fails in ~20s instead
+# of blocking for minutes on the OS retransmit - well under COMMAND_TIMEOUT_S.
+ROBOT_SOCKET_TIMEOUT_S = 20
 
 def start():
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -40,7 +44,10 @@ def start():
 def recv_packet(sock):
     hdr = b""
     while len(hdr) < 4:
-        chunk = sock.recv(4 - len(hdr))
+        try:
+            chunk = sock.recv(4 - len(hdr))
+        except TimeoutError:
+            continue  # idle robot; keep waiting (the socket timeout is for send)
         if not chunk:
             return None
         hdr += chunk
@@ -51,7 +58,10 @@ def recv_packet(sock):
         return None
     data = b""
     while len(data) < n:
-        chunk = sock.recv(min(65536, n - len(data)))
+        try:
+            chunk = sock.recv(min(65536, n - len(data)))
+        except TimeoutError:
+            continue
         if not chunk:
             return None
         data += chunk
@@ -69,6 +79,7 @@ def handle_robot(conn, addr):
     #     handle_request_from_robot,
     # )
     rc = RobotConn("<unknown>", Generation.GEN4, Gen4Conn(conn))
+    conn.settimeout(ROBOT_SOCKET_TIMEOUT_S)  # bound send() to a dead robot; recv() retries
 
     print("CONN", f"TLS connection from {addr}")
     try:

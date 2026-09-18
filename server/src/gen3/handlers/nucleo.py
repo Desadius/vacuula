@@ -28,7 +28,8 @@ def nucleo_init(req: RouterHandler) -> None:
     req.end_headers()
 
     send_chunk(req.wfile, build_heartbeat())
-    robot_connections[serial] = RobotConn(serial, Generation.GEN3, Gen2Gen3Conn(robot.password, req.wfile))
+    my_conn = RobotConn(serial, Generation.GEN3, Gen2Gen3Conn(robot.password, req.wfile))
+    robot_connections[serial] = my_conn
     notify_robots_changed()
 
     try:
@@ -40,5 +41,9 @@ def nucleo_init(req: RouterHandler) -> None:
     except Exception:
         pass
     finally:
-        robot_connections.pop(serial, None)
-        notify_robots_changed()
+        # Only tear down if this handler's connection is still the current one -
+        # a fast reconnect may have replaced it; don't drop the new one or falsely
+        # broadcast the robot as offline.
+        if robot_connections.get(serial) is my_conn:
+            robot_connections.pop(serial, None)
+            notify_robots_changed()

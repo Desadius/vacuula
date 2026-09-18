@@ -4,10 +4,11 @@ from db import get_session, db_commit2
 from gen4.map_utils import parse_session
 from models.robot import Robot
 from models.persistent_map import FloorPlan
+import queue
 import threading
 from models.run import Gen4__Run
 from state import robot_connections
-from handlers.events import notify_robots_changed
+from handlers.events import notify_robots_changed, CLIENT_QUEUE_MAX
 from utils import Generation
 
 from state import pending_requests, client_connections
@@ -109,7 +110,7 @@ def send_heartbeat(sock):
 
 
 import uuid
-def robot_send_request(rc: RobotConn, body: dict):
+def robot_send_request(rc: RobotConn, body: dict, slot=None):
     request_id = str(uuid.uuid4())
 
     msg = {
@@ -125,20 +126,27 @@ def robot_send_request(rc: RobotConn, body: dict):
         "CMD",
         f"sent to {rc.serial} id={request_id} body={json.dumps(body)}",
     )
+    if slot is not None:
+        pending_requests[request_id] = slot
     try:
         send_json(rc.conn.socket, msg)
     except Exception as e:
         print("ERROR", f"send failed: {e}")
+        if slot is not None:
+            pending_requests.pop(request_id, None)
+        raise
     
 
     return request_id
 
 def robot_response(rc: RobotConn, data: dict):
     reqId = data.get("id")
-    if reqId in pending_requests:
-        req: RouterHandler = pending_requests[reqId]
-        req.send_response_data(data, True, data["code"])
-        del pending_requests[reqId]
+    # Only fill the waiting slot and signal it - the HTTP handler thread does the
+    # actual client write, on its own socket. This thread (the robot's receive
+    # loop) must never touch a client socket, or one dead browser would kill it.
+    slot = pending_requests.get(reqId)
+    if slot is not None:
+        slot.fulfill(data, data["code"])
 
 import time
 def robot_event(rc: RobotConn, data: dict):
@@ -150,25 +158,29 @@ def robot_event(rc: RobotConn, data: dict):
 
     print("clients! ", len(clients_subscribed))
 
+    msg = json.dumps({
+        "serial": rc.serial,
+        "type": "neato.gen4",
+        "data": data,
+        "ts": time.time()
+    }) + "\n"
+    frame = f"data: {msg}\n\n".encode()
+
     for client in clients_subscribed:
+        # Non-blocking hand-off: connect_robot drains this queue and does the
+        # (blocking) socket write, so a stuck client only fills its own queue.
+        q = client["queue"]
         try:
-            msg = json.dumps({
-                "serial": rc.serial,
-                "type": "neato.gen4",
-                "data": data,
-                "ts": time.time()
-            }) + "\n"
-
-            event_data = f"data: {msg}\n\n"
-
-            client["wfile"].write(event_data.encode())
-            client["wfile"].flush()
-
-        except Exception as e:
-            print(
-                f">> failed to send event to client "
-                f"{client['client']}: {e}"
-            )
+            q.put_nowait(frame)
+        except queue.Full:
+            try:
+                q.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                q.put_nowait(frame)
+            except queue.Full:
+                pass
 
 
 import os

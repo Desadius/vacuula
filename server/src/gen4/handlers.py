@@ -26,6 +26,23 @@ if TYPE_CHECKING:
 #     'firmware': '1.7.0-2933'
 # }
 import uuid
+
+
+def _robot_timezone():
+    # The robot has no clock of its own - it takes the IANA timezone we send at
+    # login. Adapt to the server's own timezone (server and robot are colocated),
+    # with an explicit override (VACUULA_TZ) and a safe fallback.
+    import os
+    tz = os.environ.get("VACUULA_TZ")
+    if tz:
+        return tz
+    try:
+        import tzlocal
+        return tzlocal.get_localzone_name()
+    except Exception:
+        return "Europe/Lisbon"
+
+
 def handle_login(rc: RobotConn, msg):
     serial = msg.get("serial", "<unknown>")
     
@@ -52,7 +69,7 @@ def handle_login(rc: RobotConn, msg):
         "datetime": now_iso(),
         "body": {
             "ip_address": "192.168.205.113",
-            "timezone": "Europe/Stockholm",
+            "timezone": _robot_timezone(),
             "robot_id": serial,
             "user_id": "local-user",
         },
@@ -286,7 +303,16 @@ request_map = {
 
 
 def roboot_request(rc: RobotConn, msg_id: str, data: dict):
-    response_body, response_code = request_map[data["to"]["service"]](rc, data)
+    service = data["to"]["service"]
+    handler = request_map.get(service)
+    if handler is None:
+        # Unknown robot-initiated request (e.g. robots.notify, sent when a
+        # routine/scheduled clean starts). Ack it instead of KeyError-ing, which
+        # used to crash handle_robot and drop the robot mid-clean.
+        print("WARN", f"unhandled robot request service {service!r}; acking")
+        response_body, response_code = {}, 200
+    else:
+        response_body, response_code = handler(rc, data)
     response = {
         "type": "response",
         "id": msg_id,

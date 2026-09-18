@@ -6,4 +6,6 @@ numpy==2.4.6
 pillow==12.2.0
 SQLAlchemy==2.0.50
 typing_extensions==4.15.0
+tzdata==2026.4
+tzlocal==5.4.4
 zeroconf==0.151.3

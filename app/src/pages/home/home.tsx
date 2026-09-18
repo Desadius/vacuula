@@ -87,7 +87,7 @@ export default function Home() {
     const [spotHeight, setSpotHeight] = useState(200)
     const [spotWidth, setSpotWidth] = useState(200)
     const [bellAnimating, setBellAnimating] = useState(false)
-    const { lastHeartbeat } = useApp()
+    const { lastHeartbeat, promotedFloorplan } = useApp()
     const { robot } = useRobot();
 
     return (
@@ -222,7 +222,7 @@ export default function Home() {
 
                         robot.availableCommands?.resume ? (
                             <button className={`${styles.start} ${!robot.availableCommands?.resume ? styles.disabled : ''}`} aria-label={t('home.resumeCleaning')} onClick={() => {
-                                GEN3_COMMANDS.resumeCleaning(robot.serial)
+                                (robot.type === RobotType.NeatoGen3 ? GEN3_COMMANDS : GEN4_COMMANDS).resumeCleaning(robot.serial)
                             }}>
                                 <IoMdPlay size={34} />
                             </button>
@@ -236,7 +236,7 @@ export default function Home() {
                                     }
                                     GEN3_COMMANDS.startCleaning(robot.serial, gen3__cleaningMode, gen3__navigationMode)
                                 } else if (robot.type === RobotType.NeatoGen4) {
-                                    GEN4_COMMANDS.startCleaning(robot.serial, gen4__cleaningMode, gen4__navigationMode)
+                                    GEN4_COMMANDS.startCleaning(robot.serial, gen4__cleaningMode, gen4__navigationMode, null, promotedFloorplan?.id ?? null)
                                 }
 
 

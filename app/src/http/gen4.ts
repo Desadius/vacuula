@@ -53,6 +53,12 @@ function pauseCleaning(serial: string) {
     })
 }
 
+function resumeCleaning(serial: string) {
+    return Http.sendCmd(serial, {
+        ability: "cleaning.resume",
+    })
+}
+
 
 function getSettings<Op extends Neato.Gen4.SettingsGetOperation>(serial: string, settings: Neato.Gen4.RobotSettingsGet<Op>) {
     return Http.sendCmd<Neato.Gen4.BaseResponse<Neato.Gen4.SettingsMap[Op]>>(serial, {
@@ -81,20 +87,28 @@ function demoteFloorplan(serial: string, id: string) {
 }
 
 
-function startCleaning(serial: string, mode: Neato.Gen4.CleaningMode, navigationMode: Neato.Gen4.CleaningNavigationMode, temp_track_id: string) {
+function startCleaning(serial: string, mode: Neato.Gen4.CleaningMode, navigationMode: Neato.Gen4.CleaningNavigationMode, trackId?: string | null, rankId?: string | null) {
+    // Zone cleaning needs a floorplan rank_id AND the zone uploaded to the robot
+    // as a track (maps.save_track) - not wired yet (scope B). Guard so clicking a
+    // zone doesn't fall through to a full exploration clean.
+    if (trackId && !rankId) {
+        console.warn('startCleaning: zone cleaning not implemented yet (needs a promoted map + save_track)')
+        return Promise.resolve()
+    }
+    // rankId set  -> clean that persistent floorplan (track_id null = whole map).
+    // rankId null -> non-persistent / first-map exploration clean (map: null).
+    const map = rankId
+        ? { rank_id: rankId, track_id: trackId ?? null, nogo_enabled: true }
+        : null
     return Http.sendCmd(serial, {
         ability: "cleaning.start",
+        force_floorplan: false,
         runs: [{
-            map: {
-                "rank_id":     "894e115c-7934-4519-bc62-2f64db633136", // "338e289b-0a3d-406f-9247-902623b1b455",
-                "track_id":     temp_track_id, //"e79742d6-4517-4734-9dce-55d9d618d469",
-                "nogo_enabled": false,
-            },
-            // map: null,
+            map,
             settings: {
                 mode,
-                navigation_mode: navigationMode
-            }
+                navigation_mode: navigationMode,
+            },
         }]
     })
 }
@@ -110,6 +124,7 @@ export const GEN4_COMMANDS = {
     startCleaning,
     stopCleaning,
     pauseCleaning,
+    resumeCleaning,
     cleaningInfo,
     sendToBase,
 

@@ -146,11 +146,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
         persistentMapsLoader.request(robot.serial).catch(err => console.error('Failed to fetch floorplans', err))
     }, [robot?.serial, robot?.type])
 
-    // const promotedFloorplan = robot?.type === RobotType.NeatoGen4
-    //     ? (persistentMaps as Neato.Gen4.Floorplan[] | undefined)?.find(fp => fp.promoted)
-    //     : undefined
-
-    const promotedFloorplan = undefined
+    const promotedFloorplan = robot?.type === RobotType.NeatoGen4
+        ? (persistentMaps as Neato.Gen4.Floorplan[] | undefined)?.find(fp => fp.promoted)
+        : undefined
     // console.log("FLOORPLAN PROMOTED!", promotedFloorplan)
 
     // Robot list: one fetch for the first paint, then kept in sync by the

@@ -161,7 +161,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         // first, don't let the slower GET overwrite it with stale data.
         let receivedEventSnapshot = false
 
-        const events = new EventSource('/app/events')
+        const events = new EventSource('/api/events')
         events.addEventListener('robots', (event) => {
             receivedEventSnapshot = true
             setRobots(JSON.parse((event as MessageEvent).data))
@@ -232,7 +232,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         if (!robot) return;
 
         const events = new EventSource(
-            `/app/robot/${robot.serial}/connect`,
+            `/api/robot/${robot.serial}/connect`,
         );
 
         events.onopen = () => {

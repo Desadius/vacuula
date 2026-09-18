@@ -13,7 +13,7 @@ registerServiceWorker()
 
 createRoot(document.getElementById('root')!).render(
   <AppProvider>
-    <BrowserRouter>
+    <BrowserRouter basename='/web'>
       <App />
     </BrowserRouter>
   </AppProvider>,

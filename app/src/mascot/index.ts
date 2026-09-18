@@ -20,8 +20,20 @@ export interface MascotOption {
 }
 
 export const MASCOTS: MascotOption[] = [
-    { id: 'vacuula', src: logoVacuula, favicon: '/favicon-vacuula.svg', manifest: '/manifest-vacuula.webmanifest', appleTouchIcon: '/icons/apple-touch-icon-vacuula.png' },
-    { id: 'robot', src: logoRobot, favicon: '/favicon-robot.svg', manifest: '/manifest-robot.webmanifest', appleTouchIcon: '/icons/apple-touch-icon-robot.png' },
+    { 
+        id: 'vacuula',
+        src: logoVacuula,
+        favicon: `${import.meta.env.BASE_URL}/favicon-vacuula.svg`,
+        manifest: `${import.meta.env.BASE_URL}/manifest-vacuula.webmanifest`,
+        appleTouchIcon: `${import.meta.env.BASE_URL}/icons/apple-touch-icon-vacuula.png` 
+    },
+    { 
+        id: 'robot',
+        src: logoRobot,
+        favicon: `${import.meta.env.BASE_URL}/favicon-robot.svg`,
+        manifest: `${import.meta.env.BASE_URL}/manifest-robot.webmanifest`,
+        appleTouchIcon: `${import.meta.env.BASE_URL}/icons/apple-touch-icon-robot.png`
+    },
 ]
 export const DEFAULT_MASCOT = MASCOTS[0].id
 export const MASCOT_STORAGE_KEY = 'vacuula.mascot'

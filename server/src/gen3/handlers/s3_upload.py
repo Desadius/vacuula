@@ -53,7 +53,6 @@ def parse_multipart_form_data(body: bytes, boundary: str) -> tuple[dict, bytes |
 
 
 def s3_upload(req: RouterHandler) -> None:
-    print("s3 HANDLER!!!")
     """POST / - S3 upload endpoint"""
     body = req.read_data()
     if body is None:

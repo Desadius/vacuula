@@ -101,6 +101,15 @@ def heartbeat_thread(rc: RobotConn):
             send_heartbeat(rc.conn.socket)
         except Exception as e:
             print("ERROR", f"heartbeat send failed for {rc.serial}: {e}")
+            # Dead/half-open link: recv_packet retries on timeout forever, so it
+            # won't notice on its own. Stop and close the socket to unblock the
+            # receive loop -> handle_robot's finally removes the robot and
+            # broadcasts offline (liveness within ~one heartbeat interval).
+            rc.stop_event.set()
+            try:
+                rc.conn.socket.close()
+            except Exception:
+                pass
             return
 
 

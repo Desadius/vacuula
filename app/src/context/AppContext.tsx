@@ -157,12 +157,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
     // server's event stream (a `robots` event on every connect/disconnect/rename;
     // the stream also sends a snapshot each time it (re)opens, so no polling).
     useEffect(() => {
-        Http.getRobots().then((res) => setRobots(res.data)).catch(err => console.error('Failed to fetch robots', err))
+        // The initial GET and the SSE snapshot race; if a newer snapshot lands
+        // first, don't let the slower GET overwrite it with stale data.
+        let receivedEventSnapshot = false
 
         const events = new EventSource('/app/events')
         events.addEventListener('robots', (event) => {
+            receivedEventSnapshot = true
             setRobots(JSON.parse((event as MessageEvent).data))
         })
+        Http.getRobots().then((res) => {
+            if (!receivedEventSnapshot) setRobots(res.data)
+        }).catch(err => console.error('Failed to fetch robots', err))
         events.onerror = (err) => console.error('events stream error:', err)
         return () => events.close()
     }, [])
@@ -181,6 +187,46 @@ export function AppProvider({ children }: { children: ReactNode }) {
     useEffect(() => {
         if (robot) connectingRef.current = false
     }, [robot?.serial])
+
+    // If the selected robot drops and comes back, its /app/robot/{serial}/connect
+    // stream stays open (serial/type unchanged), so neither that effect nor its
+    // onopen refresh re-runs. Re-fetch the robot's state on an offline->online
+    // transition so the UI leaves the stale offline snapshot behind.
+    const prevConnRef = useRef<{ serial: string, connected: boolean } | undefined>(undefined)
+    useEffect(() => {
+        if (!robot) { prevConnRef.current = undefined; return }
+        const isConnected = !!robots?.[robot.serial]?.connected
+        const prev = prevConnRef.current
+        prevConnRef.current = { serial: robot.serial, connected: isConnected }
+        if (!prev || prev.serial !== robot.serial || prev.connected !== false || !isConnected) return
+
+        if (robot.type === RobotType.NeatoGen3) {
+            GEN3_COMMANDS.getRobotState(robot.serial).then((res) => {
+                setRobot(cur => cur ? {
+                    ...cur,
+                    type: RobotType.NeatoGen3,
+                    availableCommands: res.data.availableCommands,
+                    details: res.data.details,
+                    alert: res.data.alert,
+                    error: res.data.error,
+                    state: res.data.state,
+                    action: res.data.action,
+                } : cur)
+            }).catch(err => console.error('Failed to refresh robot state', err))
+        } else if (robot.type === RobotType.NeatoGen4) {
+            GEN4_COMMANDS.getRobotState(robot.serial).then((res) => {
+                const body = res.data.body
+                setRobot(cur => cur?.type === RobotType.NeatoGen4 ? {
+                    ...cur,
+                    availableCommands: body.available_commands,
+                    details: body.details,
+                    errors: body.errors != null ? body.errors : undefined,
+                    state: body.state,
+                    action: body.action,
+                } : cur)
+            }).catch(err => console.error('Failed to refresh robot state', err))
+        }
+    }, [robots, robot?.serial, robot?.type])
 
     useEffect(() => {
         if (!robot) return;

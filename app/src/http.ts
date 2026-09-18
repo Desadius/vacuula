@@ -11,9 +11,7 @@ import type { NoGoLine, Zone } from "./pages/map/types";
 let loadingStateCallback: ((state: { isLoading: boolean; message?: string }) => void) | null = null;
 
 const instance = axios.create({
-  // Same-origin: the dev server (vite.config.ts) and the production reverse proxy
-  // forward /app to the Python server, so the UI never needs to know its port.
-  baseURL: '/app',
+  baseURL: '/api',
 });
 
 

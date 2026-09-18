@@ -159,7 +159,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     useEffect(() => {
         Http.getRobots().then((res) => setRobots(res.data)).catch(err => console.error('Failed to fetch robots', err))
 
-        const events = new EventSource('/app/events')
+        const events = new EventSource('/api/events')
         events.addEventListener('robots', (event) => {
             setRobots(JSON.parse((event as MessageEvent).data))
         })
@@ -186,7 +186,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         if (!robot) return;
 
         const events = new EventSource(
-            `/app/robot/${robot.serial}/connect`,
+            `/api/robot/${robot.serial}/connect`,
         );
 
         events.onopen = () => {

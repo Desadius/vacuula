@@ -1,17 +1,38 @@
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime
 from handlers.route_matcher import BrainslugHandler, BEEHIVE_ROUTES, NUCLEO_ROUTES, APP_ROUTES, S3_ROUTES
-from handlers import static_ui
 from socketserver import ThreadingMixIn
 import json
 import socket
+import uuid
+
+from pathlib import Path
+import mimetypes
+WEB_ROOT = Path("web")
+WEB_ROOT_RESOLVED = WEB_ROOT.resolve()
+
+# Generated once, when the module is imported (i.e. once per server run).
+# It's folded into every ETag below, so any response a browser cached
+# becomes stale the instant the server restarts (e.g. after a deploy),
+# even if max-age hasn't expired yet.
+SERVER_BOOT_ID = uuid.uuid4().hex[:12]
+
+
+def _is_within_web_root(path: Path) -> bool:
+    """True if `path` resolves to something inside WEB_ROOT."""
+    try:
+        path.relative_to(WEB_ROOT_RESOLVED)
+        return True
+    except ValueError:
+        return False
+
 
 class RouterHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def end_headers(self):
         """Override to add CORS headers to app responses"""
-        if (self.path.startswith("/app/")):
+        if (self.path.startswith("/api/")):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
@@ -47,22 +68,91 @@ class RouterHandler(BaseHTTPRequestHandler):
             self.send_bad_request("Invalid JSON body")
             return None
 
+    def serve_web(self):
+        print("got req web!")
+        print(self.path)
+
+        # Strip /web from the URL
+        relative = self.path.removeprefix("/web")
+        # Ignore query string
+        relative = relative.split("?", 1)[0]
+        # Resolve the requested file safely
+        requested = (WEB_ROOT / relative.lstrip("/")).resolve()
+
+        # Prevent access outside server/web
+        if not _is_within_web_root(requested):
+            self.send_not_found()
+            return
+
+        # SPA fallback, react router takes over:
+        if not requested.is_file():
+            if Path(relative).suffix == "":
+                requested = WEB_ROOT_RESOLVED / "index.html"
+            else:
+                self.send_not_found()
+                return
+
+        # cache
+        cache_control = "public, max-age=3600, must-revalidate"
+        inm = self.headers.get("If-None-Match")
+
+        if inm and SERVER_BOOT_ID in (tag.strip() for tag in inm.split(",")):
+            self.send_response(304)
+            self.send_header("ETag", SERVER_BOOT_ID)
+            self.send_header("Cache-Control", cache_control)
+            self.send_header("Connection", "close")
+            self.end_headers()
+            return
+
+        print("loading!")
+        print(requested.absolute())
+        try:
+            content = requested.read_bytes()
+        except OSError:
+            self.send_internal_error("Could not read file")
+            return
+
+        content_type, _ = mimetypes.guess_type(str(requested))
+        if content_type is None:
+            content_type = "application/octet-stream"
+
+        # Re-verify immediately before writing to the socket.
+        if not _is_within_web_root(requested):
+            self.send_not_found()
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(content)))
+        self.send_header("ETag", SERVER_BOOT_ID)
+        self.send_header("Cache-Control", cache_control)
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+        self.wfile.write(content)
+        self.wfile.flush()
+
+
 
     # Routing logic
     def route(self):
+        print(self.path)
+        if self.path == "/web" or self.path.startswith("/web/"):
+            return self.serve_web()
         accept = self.headers.get("Accept", "")
         
-        if self.path.startswith("/app/"):
+        if self.path.startswith("/api/"):
             return BrainslugHandler(APP_ROUTES, self)
         elif accept == "application/vnd.neato.beehive.v1+json":
             return BrainslugHandler(BEEHIVE_ROUTES, self)
         elif accept == "application/vnd.neato.cometa.v1":
             return BrainslugHandler(NUCLEO_ROUTES, self)
+        elif self.path == "/" and self.command == "GET":
+            self.send_response(301)
+            self.send_header("Location", "/web")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
         else:
-            # Browser requests for the web app (built into app/dist) are answered
-            # here; anything that is not a UI file keeps going to the S3 routes.
-            if static_ui.serve(self):
-                return None
             return BrainslugHandler(S3_ROUTES, self)
 
     def do_POST(self):

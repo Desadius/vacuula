@@ -9,7 +9,7 @@ if TYPE_CHECKING:
 
 
 def get_cert(req: RouterHandler) -> None:
-    """GET /app/cert - return server certificate."""
+    """GET /cert - return server certificate."""
 
     file = Path("ssl/cert.pem")
 
@@ -23,8 +23,9 @@ def get_cert(req: RouterHandler) -> None:
 
 
 # mDNS stuff
-SERVICE_TYPE = "_vacuula-server._tcp.local."
-SERVICE_NAME = "Vacuula Server._vacuula-server._tcp.local."
+SERVICE_TYPE = "_vacuula._tcp.local."
+SERVICE_NAME = "Vacuula._vacuula._tcp.local."
+MDNS_HOSTNAME = "vacuula.local."
 PORT = 8080
 
 def get_local_ip() -> str:
@@ -47,10 +48,11 @@ class MDNSAdvertiser:
             SERVICE_TYPE,
             SERVICE_NAME,
             addresses=[socket.inet_aton(ip)],
+            server=MDNS_HOSTNAME,
             port=PORT,
             properties={
                 "version": "1",
-                "cert-path": "/app/cert",
+                "cert-path": "/api/cert",
             },
         )
 

@@ -222,3 +222,4 @@ ssl/*.pem
 server/ssl/*.pem
 uploads/
 vacuula.db
+server/web

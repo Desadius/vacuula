@@ -86,23 +86,15 @@ function demoteFloorplan(serial: string, id: string) {
     })
 }
 
-
-function startCleaning(serial: string, mode: Neato.Gen4.CleaningMode, navigationMode: Neato.Gen4.CleaningNavigationMode, trackId?: string | null, rankId?: string | null) {
-    // Zone cleaning needs a floorplan rank_id AND the zone uploaded to the robot
-    // as a track (maps.save_track) - not wired yet (scope B). Guard so clicking a
-    // zone doesn't fall through to a full exploration clean.
-    if (trackId && !rankId) {
-        console.warn('startCleaning: zone cleaning not implemented yet (needs a promoted map + save_track)')
-        return Promise.resolve()
-    }
-    // rankId set  -> clean that persistent floorplan (track_id null = whole map).
-    // rankId null -> non-persistent / first-map exploration clean (map: null).
-    const map = rankId
-        ? { rank_id: rankId, track_id: trackId ?? null, nogo_enabled: true }
-        : null
+function startCleaning(serial: string, mode: Neato.Gen4.CleaningMode, navigationMode: Neato.Gen4.CleaningNavigationMode, mapId?: string, zoneId?: string) {
+    // no mapId = full possible clean
+    // only mapId = cleaning of map, going around nogo lines and nogo zones
+    // mapId & zoneId = clean that zone
+    const map = mapId !== undefined ? 
+        { rank_id: mapId, track_id: zoneId ?? null, nogo_enabled: true } : 
+        null // robot needs null as value
     return Http.sendCmd(serial, {
         ability: "cleaning.start",
-        force_floorplan: false,
         runs: [{
             map,
             settings: {

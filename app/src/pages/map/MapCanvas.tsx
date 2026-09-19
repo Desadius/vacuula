@@ -2,10 +2,10 @@ import { useState } from 'react'
 import styles from './map.module.scss'
 import { FaPlus, FaUndo } from 'react-icons/fa'
 import { PiBoundingBox } from 'react-icons/pi'
-import { DRAWING } from './constants'
-import type { Point, UseState } from './types'
-import { getCrosshairWorldCoords } from './utils'
 import { useMap, type ExtraDrawFn } from '../../components/map/useMap'
+import { DRAWING } from '../../components/map/constants'
+import type { Point, UseState } from '../../components/map/types'
+import { getCrosshairWorldCoords } from '../../components/map/utils'
 
 // Single source of truth for the page's mode union — map.tsx imports this rather
 // than declaring its own copy.

@@ -21,6 +21,7 @@ import { getRobotStateKey } from '../../utils/state'
 import { useTranslation } from 'react-i18next'
 import { useTimeAgoFormatter } from '../../i18n/timeago'
 import { useUnits } from '../../units'
+import { useGetPromotedFloorplan } from '../../utils/floormaps'
 
 
 // ── Alert card ────────────────────────────────────────────────────────────────
@@ -87,8 +88,9 @@ export default function Home() {
     const [spotHeight, setSpotHeight] = useState(200)
     const [spotWidth, setSpotWidth] = useState(200)
     const [bellAnimating, setBellAnimating] = useState(false)
-    const { lastHeartbeat, promotedFloorplan } = useApp()
+    const { lastHeartbeat } = useApp()
     const { robot } = useRobot();
+    const getPromotedFloorplan = useGetPromotedFloorplan()
 
     return (
         <div className={styles.home}>
@@ -227,7 +229,7 @@ export default function Home() {
                                 <IoMdPlay size={34} />
                             </button>
                         ) : (
-                            <button className={`${styles.start} ${!robot.availableCommands?.start ? styles.disabled : ''}`} aria-label={t('home.startCleaning')} onClick={() => {
+                            <button className={`${styles.start} ${!robot.availableCommands?.start ? styles.disabled : ''}`} aria-label={t('home.startCleaning')} onClick={async () => {
 
                                 if (robot.type === RobotType.NeatoGen3) {
                                     if (gen3__cleaningCategory === CleaningCategory.SPOT) {
@@ -236,7 +238,8 @@ export default function Home() {
                                     }
                                     GEN3_COMMANDS.startCleaning(robot.serial, gen3__cleaningMode, gen3__navigationMode)
                                 } else if (robot.type === RobotType.NeatoGen4) {
-                                    GEN4_COMMANDS.startCleaning(robot.serial, gen4__cleaningMode, gen4__navigationMode, null, promotedFloorplan?.id ?? null)
+                                    const promotedFloorplan = await getPromotedFloorplan()
+                                    // GEN4_COMMANDS.startCleaning(robot.serial, gen4__cleaningMode, gen4__navigationMode, promotedFloorplan?.id)
                                 }
 
 

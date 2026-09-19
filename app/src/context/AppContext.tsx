@@ -17,7 +17,6 @@ interface AppContextType {
     lastHeartbeat?: number,
 
     persistentMaps?: (Neato.Gen3.PersistentMap[] | Neato.Gen4.Floorplan[])
-    promotedFloorplan?: Neato.Gen4.Floorplan, // derived, no separate setter exposed
 
     setPersistentMaps: UseState<(Neato.Gen3.PersistentMap[] | Neato.Gen4.Floorplan[]) | undefined>
 
@@ -54,8 +53,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const [isLoading, setIsLoading] = useState(false)
     const [loadingState, setLoadingState] = useState<{ isLoading: boolean, message?: string }>({ isLoading: false })
     const [message, setMessage] = useState<string | null>(null)
-
-    const { data: persistentMaps } = persistentMapsLoader.useValue(robot?.serial ?? '')
 
     useEffect(() => {
         Http.setLoadingStateCallback(setLoadingState)
@@ -145,11 +142,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
         if (!robot) return;
         persistentMapsLoader.request(robot.serial).catch(err => console.error('Failed to fetch floorplans', err))
     }, [robot?.serial, robot?.type])
-
-    const promotedFloorplan = robot?.type === RobotType.NeatoGen4
-        ? (persistentMaps as Neato.Gen4.Floorplan[] | undefined)?.find(fp => fp.promoted)
-        : undefined
-    // console.log("FLOORPLAN PROMOTED!", promotedFloorplan)
 
     // Robot list: one fetch for the first paint, then kept in sync by the
     // server's event stream (a `robots` event on every connect/disconnect/rename;
@@ -346,9 +338,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setCleanings,
 
         updateRobotName,
-
-
-        promotedFloorplan
     }
 
     return (

@@ -29,9 +29,6 @@ import uuid
 
 
 def _robot_timezone():
-    # The robot has no clock of its own - it takes the IANA timezone we send at
-    # login. Adapt to the server's own timezone (server and robot are colocated),
-    # with an explicit override (VACUULA_TZ) and a safe fallback.
     import os
     tz = os.environ.get("VACUULA_TZ")
     if tz:
@@ -306,11 +303,8 @@ def roboot_request(rc: RobotConn, msg_id: str, data: dict):
     service = data["to"]["service"]
     handler = request_map.get(service)
     if handler is None:
-        # Unknown robot-initiated request (e.g. robots.notify, sent when a
-        # routine/scheduled clean starts). Ack it instead of KeyError-ing, which
-        # used to crash handle_robot and drop the robot mid-clean.
-        print("WARN", f"unhandled robot request service {service!r}; acking")
-        response_body, response_code = {}, 200
+        print("TODO: handle this at a later stage")
+        return
     else:
         response_body, response_code = handler(rc, data)
     response = {

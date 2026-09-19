@@ -11,7 +11,7 @@ import type { NoGoLine, Zone } from "./pages/map/types";
 let loadingStateCallback: ((state: { isLoading: boolean; message?: string }) => void) | null = null;
 
 const instance = axios.create({
-  baseURL: '/api',
+  baseURL: 'http://localhost/api',
 });
 
 

@@ -2,21 +2,13 @@ import { useRef, useEffect, useState, useCallback } from 'react'
 import styles from './map.module.scss'
 import Drawer from '../../components/drawer/drawer'
 
-import { DRAWING } from './constants'
-import type { NoGoLine, Zone, Point, SetZone, UseState } from './types'
-import { FaPlus, FaTimes, FaUndo, FaPen, FaCheckCircle, FaCircle } from 'react-icons/fa'
 import Input from '../../components/input/input'
-import { PiBoundingBox } from "react-icons/pi";
-import { biEnum } from '../../types/.helpers'
 import Button from '../../components/button/button'
 import { GEN3_COMMANDS } from '../../http/gen3'
-import { CleaningMode, CleaningNavigationMode } from '../../types/neato/gen3/state'
 import { Http } from '../../http'
 import { Neato, RobotType, type Robot } from '../../types'
 
 import MapCanvas, { type MapMode } from './MapCanvas'
-import { drawZones, drawNoGoLines, drawInProgressPolyline, drawCrosshair, drawBase } from './drawingFunctions'
-import { upsertPreserveOrder } from './utils'
 import { GEN4_COMMANDS } from '../../http/gen4'
 import { useRobot } from '../../context/useRobot'
 import { usePersistentMaps } from '../../loaders/resources'
@@ -24,6 +16,10 @@ import type { Floorplan } from '../../types/neato/gen4'
 import { v4 as uuidv4 } from 'uuid';
 import { useTranslation } from 'react-i18next'
 import i18n from '../../i18n'
+import { useGetPromotedFloorplan } from '../../utils/floormaps'
+import type { NoGoLine, Point, UseState, Zone } from '../../components/map/types'
+import { drawZones, drawNoGoLines, drawBase, drawCrosshair, drawInProgressPolyline } from '../../components/map/drawingFunctions'
+import type { upsertPreserveOrder } from '../../components/map/utils'
 
 
 export default () => {
@@ -54,6 +50,8 @@ export default () => {
     const skipNextPostRef = useRef(false)
 
     const { data: persistentMaps, refresh: updatePersistentMaps } = usePersistentMaps()
+    const getPromotedFloorplan = useGetPromotedFloorplan()
+    
 
     const extraDraw = useCallback((ctx, canvas, currentZoom, currentOffset, mapSize) => {
         const showBoundaries = mode === 'boundary-edit'
@@ -358,9 +356,11 @@ export default () => {
                                         </span>
                                     </div>
                                     {item.type === 'polyline' && (<Input type="switch" skipSection={true} value={item.enabled} onChange={() => toggleNoGoLine(item)} />)}
-                                    {item.type === 'polygon' && (<Button style='primary' text={t('map.cleanZone')} onClick={() => {
+                                    {item.type === 'polygon' && (<Button style='primary' text={t('map.cleanZone')} onClick={async () => {
                                         // GEN3_COMMANDS.startCleaningZone('GPC23118-40bd32d13ac7', item.id, CleaningMode.ECO, CleaningNavigationMode.EXTRA_CARE)
-                                        GEN4_COMMANDS.startCleaning(robot.serial, Neato.Gen4.CleaningMode.ECO, Neato.Gen4.CleaningNavigationMode.GENTLE, item.id)
+                                        const promotedFloorplan = await getPromotedFloorplan();
+                                        if (!promotedFloorplan) return // TODO: ERROR (will do when i do gen3)
+                                        // GEN4_COMMANDS.startCleaning(robot.serial, Neato.Gen4.CleaningMode.ECO, Neato.Gen4.CleaningNavigationMode.GENTLE, promotedFloorplan.id, item.id)
                                     }} />)}
                                 </div>
                             ))}

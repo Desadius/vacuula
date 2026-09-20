@@ -16,6 +16,7 @@ import { GEN3_COMMANDS } from '../../http/gen3'
 import Input from '../../components/input/input'
 import { Neato, RobotType, type Gen4Robot, type Robot } from '../../types'
 import { GEN4_COMMANDS } from '../../http/gen4'
+import { Http } from '../../http'
 import { useRobot } from '../../context/useRobot'
 import { getRobotStateKey } from '../../utils/state'
 import { useTranslation } from 'react-i18next'
@@ -227,7 +228,7 @@ export default function Home() {
                                 <IoMdPlay size={34} />
                             </button>
                         ) : (
-                            <button className={`${styles.start} ${!robot.availableCommands?.start ? styles.disabled : ''}`} aria-label={t('home.startCleaning')} onClick={() => {
+                            <button className={`${styles.start} ${!robot.availableCommands?.start ? styles.disabled : ''}`} aria-label={t('home.startCleaning')} onClick={async () => {
 
                                 if (robot.type === RobotType.NeatoGen3) {
                                     if (gen3__cleaningCategory === CleaningCategory.SPOT) {
@@ -236,18 +237,58 @@ export default function Home() {
                                     }
                                     GEN3_COMMANDS.startCleaning(robot.serial, gen3__cleaningMode, gen3__navigationMode)
                                 } else if (robot.type === RobotType.NeatoGen4) {
-                                    GEN4_COMMANDS.startCleaning(robot.serial, gen4__cleaningMode, gen4__navigationMode, null, promotedFloorplan?.id ?? null)
+                                    // Gen4 Start depends on the selected category. The category
+                                    // selector state is Gen3-typed but is just HOUSE/MAP/SPOT, so
+                                    // it is reused here. Gen3 commands are never sent from this branch.
+                                    const rankId = promotedFloorplan?.id ?? null
+
+                                    if (gen3__cleaningCategory === CleaningCategory.SPOT) {
+                                        // Gen4 spot clean is not implemented yet (needs the spot
+                                        // protocol + user distances). Deferred to its own branch.
+                                        console.warn('Gen4 spot cleaning not implemented yet')
+                                        return;
+                                    }
+
+                                    if (!rankId) {
+                                        // No promoted floorplan yet: the only sensible action is a
+                                        // whole-map (exploration) clean.
+                                        GEN4_COMMANDS.startCleaning(robot.serial, gen4__cleaningMode, gen4__navigationMode, null, null)
+                                        return;
+                                    }
+
+                                    // Both HOUSE and MAP use the map's persisted config for no-go:
+                                    // the floorplan holds ONE no-go union (firmware limit), applied
+                                    // iff any no-go line is currently enabled on the map.
+                                    let boundaries: any[] = []
+                                    try {
+                                        boundaries = (await Http.getBoundaries(robot.serial, rankId)).data ?? []
+                                    } catch (e) {
+                                        console.error('failed to load map boundaries for cleaning', e)
+                                    }
+                                    const nogoActive = boundaries.some(b => !b.deleted && b.enabled && (b.type === 'polyline' || b.function === 'nogo'))
+
+                                    if (gen3__cleaningCategory === CleaningCategory.HOUSE) {
+                                        // Whole floorplan, NOT restricted to zones, but honouring the
+                                        // active no-go lines. Distinct from "explore new map"
+                                        // (rankId=null) which lives in the map tab.
+                                        GEN4_COMMANDS.startCleaning(robot.serial, gen4__cleaningMode, gen4__navigationMode, null, rankId, nogoActive)
+                                        return;
+                                    }
+
+                                    // MAP: clean the map's persisted configuration - every ENABLED
+                                    // cleaning zone, with the active no-go. Promote first so the
+                                    // robot holds the current zone/no-go tracks (same as map tab).
+                                    const zoneIds = boundaries
+                                        .filter(b => !b.deleted && b.enabled && b.type === 'polygon' && b.function === 'cleaning')
+                                        .map(b => b.id as string)
+                                    try {
+                                        await Http.test(robot.serial, rankId)
+                                    } catch (e) {
+                                        console.error('apply zones/no-go before cleaning failed', e)
+                                    }
+                                    await new Promise(r => setTimeout(r, 1000)) // let the robot commit the promote
+                                    GEN4_COMMANDS.startCleaningZones(robot.serial, gen4__cleaningMode, gen4__navigationMode, rankId, zoneIds, nogoActive)
                                 }
-
-
-                                // const http = robot.type === RobotType.NeatoGen3 ? GEN3_COMMANDS : GEN4_COMMANDS;
-                                // if (gen3__cleaningCategory === CleaningCategory.SPOT) {
-                                //     GEN3_COMMANDS.startCleaningSpot(robot.serial, spotHeight, spotWidth, gen3__cleaningMode, gen3__navigationMode)
-                                // } else if (gen3__cleaningCategory === CleaningCategory.MAP) {
-                                //     GEN3_COMMANDS.startCleaning(robot.serial, gen3__cleaningMode, gen3__navigationMode)
-                                // } else {
-                                //     http.startCleaning(robot.serial, gen4__cleaningMode, gen4__navigationMode)
-                                // }
                             }}>
                                 <IoMdPlay size={34} />
                             </button>

@@ -66,8 +66,15 @@ def post_boundaries(req: RouterHandler, serial: str, map_id: str) -> None:
         "function",
     }
 
+    # Merge/upsert semantics: required keys must all be present; "deleted" is the
+    # only permitted extra key (marks a boundary for explicit removal). We do NOT
+    # delete rows just because they are absent from the payload - a stale/partial
+    # POST from one tab must never wipe boundaries another tab persisted.
+    allowed_extra = {"deleted"}
     for boundary in data:
-        if set(boundary) != keys_required:
+        missing = keys_required - set(boundary)
+        extra = set(boundary) - keys_required - allowed_extra
+        if missing or extra:
             req.send_bad_request("not all required keys")
             return
 
@@ -77,14 +84,15 @@ def post_boundaries(req: RouterHandler, serial: str, map_id: str) -> None:
         ).all()
 
         existing_by_id = {boundary.id: boundary for boundary in existing}
-        incoming_ids = {boundary["id"] for boundary in data}
-
-        for boundary in existing:
-            if boundary.id not in incoming_ids:
-                session.delete(boundary)
 
         for boundary in data:
             current = existing_by_id.get(boundary["id"])
+
+            # Explicit removal: only delete when the client says so.
+            if boundary.get("deleted"):
+                if current:
+                    session.delete(current)
+                continue
 
             if current:
                 current.name = boundary["name"]
@@ -183,6 +191,48 @@ def _build_pgm_bytes(img: Image.Image, floorplan: FloorPlan) -> bytes:
     pixels_16[1::2] = pixels_8   # low byte
     return header + bytes(pixels_16)
 
+def _mark_targets_inside_zones(real_blob, cleaning_zones, floorplan):
+    # Set byte==6 cells inside each cleaning-zone polygon to byte==4 in the
+    # real.pgm payload, so the firmware's target finder has valid targets
+    # (byte 3/4) even over already-cleaned floor. One-time, applied only to the
+    # bytes sent in this promote; the file on disk is untouched. Returns the
+    # (re-compressed) blob, or the original on any failure / no-op.
+    try:
+        import zlib as _zlib
+        import numpy as _np
+        raw = _zlib.decompress(real_blob)
+        if not raw.startswith(b"P5"):
+            return real_blob
+        W, H = floorplan.imgsize
+        pixels_offset = len(raw) - W * H
+        if pixels_offset < 4 or pixels_offset > 1024:
+            print("PROMOTE_PATCH: real.pgm size mismatch (offset=%d); skipping" % pixels_offset)
+            return real_blob
+        arr = _np.frombuffer(raw[pixels_offset:pixels_offset + W * H], dtype=_np.uint8).reshape(H, W).copy()
+        changed = 0
+        for boundary in cleaning_zones:
+            if boundary.type != "polygon" or len(boundary.vertices) < 3:
+                continue
+            pts = [(p[0] * W, p[1] * H) for p in boundary.vertices]
+            mimg = Image.new("L", (W, H), 0)
+            ImageDraw.Draw(mimg).polygon(pts, fill=1, outline=1)
+            mask = _np.array(mimg, dtype=bool)
+            targets = mask & (arr == 6)
+            n = int(targets.sum())
+            if n:
+                arr[targets] = 4
+                changed += n
+        if not changed:
+            print("PROMOTE_PATCH: no byte=6 cells inside cleaning polygons; unchanged")
+            return real_blob
+        new_raw = raw[:pixels_offset] + arr.tobytes()
+        print("PROMOTE_PATCH: marked %d cells (6->4) inside cleaning polygons" % changed)
+        return _zlib.compress(new_raw, level=9)
+    except Exception as _e:
+        print("PROMOTE_PATCH failed (non-fatal): %s: %s" % (type(_e).__name__, _e))
+        return real_blob
+
+
 def get_test(req: RouterHandler, serial: str, map_id: str) -> None:
     """GET /robot/<serial>/maps/<map_id>/test - get boundaries"""
 
@@ -191,9 +241,15 @@ def get_test(req: RouterHandler, serial: str, map_id: str) -> None:
             select(FloorPlan).where(FloorPlan.id == map_id)
         ).scalar_one_or_none()
 
+        # Fetch ALL boundaries (enabled or not). The no-go track is one shared
+        # object per floorplan, so its GEOMETRY must always be uploaded whole -
+        # otherwise disabling no-go for one run (manual clean) would empty the
+        # track and break every schedule that references it. Whether a given run
+        # APPLIES the no-go is a per-run flag (nogo_enabled on cleaning.start),
+        # not something encoded by dropping the geometry here.
         boundaries: Sequence[Boundary] = session.execute(
             select(Boundary)
-            .where(Boundary.floorplan == map_id, Boundary.enabled == True)
+            .where(Boundary.floorplan == map_id)
         ).scalars().all()
 
         promoted_map_id = session.scalar(
@@ -204,12 +260,27 @@ def get_test(req: RouterHandler, serial: str, map_id: str) -> None:
             )
         )
 
-    if promoted_map_id is not None: demote_floorplan(serial, promoted_map_id)
+    # NOTE: do NOT demote here. maps.demote_floorplan DELETES the floorplan on
+    # the robot, and that also deletes any schedules bound to it (they come back
+    # enabled=False, track_id=None after a manual clean). Instead we promote with
+    # old_rank_uuid = the currently-promoted rank below, which the firmware treats
+    # as an atomic in-place swap that preserves the floorplan and its schedules.
+    # (Same approach as Vacuula 2's send_promote_floorplan atomic swap.)
 
     
-    import base64, zlib
+    import base64, zlib, os
 
-    cleaning_zones = [b for b in boundaries if b.function == "cleaning"]
+    # Debug rasteriser dumps: off by default so the repo isn't littered on every
+    # promote. Set VACUULA_DEBUG_DUMP=1 to write the .pgm images to DEBUG_DUMP_DIR.
+    DEBUG_DUMP = os.environ.get("VACUULA_DEBUG_DUMP") == "1"
+    DEBUG_DUMP_DIR = os.environ.get("VACUULA_DEBUG_DIR", r"D:\Jairo\Neato\D10\GitHub\claude\pgm-scratch")
+    if DEBUG_DUMP:
+        os.makedirs(DEBUG_DUMP_DIR, exist_ok=True)
+
+    # Cleaning zones respect `enabled` (a disabled zone should not be cleaned or
+    # target-marked). The no-go geometry is ALWAYS built from every no-go line so
+    # the shared track stays whole regardless of the per-run nogo_enabled flag.
+    cleaning_zones = [b for b in boundaries if b.function == "cleaning" and b.enabled]
     nogo_zones     = [b for b in boundaries if b.function == "nogo"]
 
     nogo_img = Image.new("L", floorplan.imgsize, BG_PIXEL)
@@ -238,12 +309,14 @@ def get_test(req: RouterHandler, serial: str, map_id: str) -> None:
             "binary":     base64.b64encode(zlib.compress(clean_raw, level=9)).decode("ascii"),
         })
 
-        with open(f'./clean_raw_{boundary.id}.pgm', 'wb') as f:
-            f.write(clean_raw)
-        
+        if DEBUG_DUMP:
+            with open(os.path.join(DEBUG_DUMP_DIR, f'clean_raw_{boundary.id}.pgm'), 'wb') as f:
+                f.write(clean_raw)
 
-    with open('./nogo_raw.pgm', 'wb') as f:
-        f.write(nogo_raw)
+
+    if DEBUG_DUMP:
+        with open(os.path.join(DEBUG_DUMP_DIR, 'nogo_raw.pgm'), 'wb') as f:
+            f.write(nogo_raw)
 
 
 
@@ -251,12 +324,13 @@ def get_test(req: RouterHandler, serial: str, map_id: str) -> None:
 
     with open(f'uploads/maps/{serial}/{map_id}/rank_binary.pgm.nz', 'rb') as rank:
         with open(f'uploads/maps/{serial}/{map_id}/real_binary.pgm.nz', 'rb') as real:
+            real_binary_patched = _mark_targets_inside_zones(real.read(), cleaning_zones, floorplan)
             payload = {
                 "ability": "maps.promote_floorplan",
                 "rank_uuid":     floorplan.id,
                 "rank_binary":   base64.b64encode(rank.read()).decode("ascii"),
-                "real_binary":   base64.b64encode(real.read()).decode("ascii"),
-                "old_rank_uuid": None, # manually demoted
+                "real_binary":   base64.b64encode(real_binary_patched).decode("ascii"),
+                "old_rank_uuid": promoted_map_id, # atomic in-place swap (see note above) - preserves schedules
                 "base": {
                     "x":   floorplan.base[0],
                     "y":   floorplan.base[1],
@@ -270,7 +344,8 @@ def get_test(req: RouterHandler, serial: str, map_id: str) -> None:
                 "cleaning_tracks": cleaning_tracks,
             }
 
-            print(payload)
+            if DEBUG_DUMP:
+                print(payload)
 
             robot_send_request(robot_connections[serial], payload)
 

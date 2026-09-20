@@ -49,6 +49,7 @@ export default () => {
     const [mode, setMode] = useState<MapMode>('maps')
     const [returnFromEditMode, SetReturnFromEditMode] = useState<'boundaries' | 'boundary-info'>('boundaries')
     const [activeBoundaryId, setActiveBoundaryId] = useState<string | undefined>(undefined);
+    const [selectedZones, setSelectedZones] = useState<Set<string>>(new Set())
 
     const { robot } = useRobot()
     const skipNextPostRef = useRef(false)
@@ -56,9 +57,10 @@ export default () => {
     const { data: persistentMaps, refresh: updatePersistentMaps } = usePersistentMaps()
 
     const extraDraw = useCallback((ctx, canvas, currentZoom, currentOffset, mapSize) => {
+        const visibleBoundaries = boundaries.filter(b => !b.deleted)
         const showBoundaries = mode === 'boundary-edit'
-            ? boundaries.filter(b => b.id !== activeBoundaryId)
-            : boundaries
+            ? visibleBoundaries.filter(b => b.id !== activeBoundaryId)
+            : visibleBoundaries
 
         drawZones(ctx, showBoundaries.filter(b => b.type === 'polygon'), currentZoom, currentOffset, mapSize)
         drawNoGoLines(ctx, showBoundaries.filter(b => b.type === 'polyline'), currentZoom, currentOffset, mapSize)
@@ -78,7 +80,7 @@ export default () => {
         if (mode === 'boundary-edit') {
             drawCrosshair(ctx, canvas)
             if (closedAsPolygon) {
-                drawZones(ctx, [{ vertices: currentLinePoints, name: '', color: editForm.color, type: 'polygon', id: '', enabled: true }], currentZoom, currentOffset, mapSize)
+                drawZones(ctx, [{ vertices: currentLinePoints, name: '', color: editForm.color, function: 'cleaning', type: 'polygon', id: '', enabled: true }], currentZoom, currentOffset, mapSize)
             } else {
                 drawInProgressPolyline(ctx, currentLinePoints, currentZoom, currentOffset, mapSize)
             }
@@ -117,8 +119,15 @@ export default () => {
             skipNextPostRef.current = false
             return
         }
-        console.log(boundaries);
-        Http.postBoundaries(robot.serial, persistentMap, boundaries);
+        Http.postBoundaries(robot.serial, persistentMap, boundaries).then(() => {
+            // Once the server has persisted the removals, drop the tombstoned
+            // items from local state. Guard the resulting setBoundaries so it
+            // doesn't re-trigger a redundant POST.
+            if (boundaries.some(b => b.deleted)) {
+                skipNextPostRef.current = true
+                setBoundaries(prev => prev.filter(b => !b.deleted))
+            }
+        });
     }, [boundaries]);
 
     // mode changes
@@ -157,7 +166,7 @@ export default () => {
             id,
             name: editForm.name,
             color: editForm.color,
-            function: closedAsPolygon ? (editForm.zoneType === BoundaryTypes.CLEANING_ZONE ? 'cleaning' : 'nogo') : 'nogo',
+            function: closedAsPolygon ? (editForm.zoneType === BoundaryTypes.NOGO_ZONE ? 'nogo' : 'cleaning') : 'nogo',
             type: closedAsPolygon ? 'polygon' as const : 'polyline' as const,
             vertices: currentLinePoints,
             enabled: true
@@ -169,12 +178,40 @@ export default () => {
         update(prev => ({ ...prev, ...patch }))
     }
 
-    const toggleNoGoLine = (item: NoGoLine) => {
+    const toggleNoGoLine = (item: NoGoLine | Zone) => {
         setBoundaries(prev => upsertPreserveOrder(prev, { ...item, enabled: !item.enabled }));
     };
 
+    const toggleZoneSelect = (id: string) => {
+        setSelectedZones(prev => {
+            const next = new Set(prev)
+            if (next.has(id)) next.delete(id); else next.add(id)
+            return next
+        })
+    };
+
+    const startCleaningSelected = async () => {
+        if (!persistentMap) return
+        try {
+            await Http.test(robot.serial, persistentMap)   // apply: push map + active no-go + zones (with target-marking)
+        } catch (e) {
+            console.error('apply zones/no-go before cleaning failed', e)
+        }
+        await new Promise(r => setTimeout(r, 1000))         // let the robot commit the promote before cleaning.start
+        const zoneIds = boundaries.filter(b => !b.deleted && b.type === 'polygon' && b.function === 'cleaning' && selectedZones.has(b.id)).map(b => b.id)
+        // No-go is applied for this run iff any no-go line is currently enabled on
+        // the map. The geometry is always uploaded (server keeps the shared track
+        // whole); this flag only decides whether THIS manual run obeys it, so it
+        // never disturbs schedules that reference the same no-go track.
+        const nogoActive = boundaries.some(b => !b.deleted && (b.type === 'polyline' || (b as Zone).function === 'nogo') && b.enabled)
+        GEN4_COMMANDS.startCleaningZones(robot.serial, Neato.Gen4.CleaningMode.ECO, Neato.Gen4.CleaningNavigationMode.GENTLE, persistentMap, zoneIds, nogoActive)
+    };
+
     const deleteBoundary = (id: string) => {
-        setBoundaries(prev => prev.filter(boundary => boundary.id !== id));
+        // Tombstone the boundary so the next postBoundaries carries an explicit
+        // delete signal (server uses merge/upsert and won't remove absent rows).
+        // The post effect prunes deleted items from state after a successful POST.
+        setBoundaries(prev => prev.map(b => b.id === id ? { ...b, deleted: true } : b));
         setMode('boundaries')
     };
 
@@ -266,7 +303,9 @@ export default () => {
                             <span style={{ textAlign: 'center' }}>{t('map.noMaps')}</span>
                         )}
                         <hr style={{ width: '90%' }} />
-                        <div className={styles.item} style={{ justifyContent: 'center', textAlign: 'center', background: 'var(--accent-soft)' }} onClick={() => GEN3_COMMANDS.startPersistentMapExploration(robot.serial)}>
+                        <div className={styles.item} style={{ justifyContent: 'center', textAlign: 'center', background: 'var(--accent-soft)' }} onClick={() => robot.type === RobotType.NeatoGen4
+                            ? GEN4_COMMANDS.startCleaning(robot.serial, Neato.Gen4.CleaningMode.ECO, Neato.Gen4.CleaningNavigationMode.GENTLE)
+                            : GEN3_COMMANDS.startPersistentMapExploration(robot.serial)}>
                             <div className={styles.info}>
                                 <span>{t('map.newMap')}</span>
                                 <span className={styles.type}>{t('map.exploreNewMap')}</span>
@@ -329,6 +368,8 @@ export default () => {
                             setMode('boundary-edit');
                             SetReturnFromEditMode(mode)
                         }}
+                        onCleanZone={(zone) => GEN3_COMMANDS.startCleaningZone(robot.serial, zone.id, CleaningMode.ECO, CleaningNavigationMode.EXTRA_CARE)}
+                        isGen4={robot.type === RobotType.NeatoGen4}
                     />
                 )}
 
@@ -345,11 +386,12 @@ export default () => {
                         </div>
                         <hr />
                         <div className={styles.buttonContainer}>
+                            {robot.type === RobotType.NeatoGen4 && <Button text={t('map.startCleaning', 'Start cleaning')} style='primary' onClick={startCleaningSelected} />}
                             <Button text={t('map.addFeature')} style='primary' onClick={() => openEdit(uuidv4())} />
                         </div>
 
                         <div className={styles.featureList}>
-                            {boundaries.map((item, i) => (
+                            {boundaries.filter(b => !b.deleted).map((item, i) => (
                                 <div key={i} className={styles.item} style={{ background: `${item.color || 'red'}22` }} onClick={() => openInfo(item.id)}>
                                     <div className={styles.info}>
                                         <span>{item.name}</span>
@@ -357,11 +399,9 @@ export default () => {
                                             {item.type === 'polygon' ? t('map.zone') : t('map.noGoLine')}
                                         </span>
                                     </div>
-                                    {item.type === 'polyline' && (<Input type="switch" skipSection={true} value={item.enabled} onChange={() => toggleNoGoLine(item)} />)}
-                                    {item.type === 'polygon' && (<Button style='primary' text={t('map.cleanZone')} onClick={() => {
-                                        // GEN3_COMMANDS.startCleaningZone('GPC23118-40bd32d13ac7', item.id, CleaningMode.ECO, CleaningNavigationMode.EXTRA_CARE)
-                                        GEN4_COMMANDS.startCleaning(robot.serial, Neato.Gen4.CleaningMode.ECO, Neato.Gen4.CleaningNavigationMode.GENTLE, item.id)
-                                    }} />)}
+                                    {(item.type === 'polyline' || (item as Zone).function === 'nogo') && (<Input type="switch" skipSection={true} value={item.enabled} onChange={() => toggleNoGoLine(item)} />)}
+                                    {robot.type === RobotType.NeatoGen4 && (item as Zone).function === 'cleaning' && (<div onClick={(e) => e.stopPropagation()}><Input type="switch" skipSection={true} value={selectedZones.has(item.id)} onChange={() => toggleZoneSelect(item.id)} /></div>)}
+                                    {robot.type === RobotType.NeatoGen3 && item.type === 'polygon' && (<div onClick={(e) => e.stopPropagation()}><Button style='primary' text={t('map.cleanZone', 'Clean zone')} onClick={() => GEN3_COMMANDS.startCleaningZone(robot.serial, item.id, CleaningMode.ECO, CleaningNavigationMode.EXTRA_CARE)} /></div>)}
                                 </div>
                             ))}
                         </div>
@@ -376,6 +416,8 @@ interface BoundaryDetailsProps {
     boundary: NoGoLine | Zone
     editBoundary: (id: string) => void
     deleteBoundary: (id: string) => void
+    onCleanZone: (boundary: Zone) => void
+    isGen4: boolean
 }
 
 const BoundaryDetails = (props: BoundaryDetailsProps) => {
@@ -389,13 +431,12 @@ const BoundaryDetails = (props: BoundaryDetailsProps) => {
                         <span className={styles.type} style={{ color: props.boundary.color }}>{props.boundary.type === 'polygon' ? t('map.zone') : t('map.noGoLine')}</span>
                     </div>
                     {props.boundary.type === 'polyline' && (<Input type="switch" skipSection={true} value={props.boundary.enabled} onChange={(value) => props.boundary.enabled = value} />)}
-                    {props.boundary.type === 'polygon' && (<Button style='primary' text={t('map.cleanZone')} onClick={() => { }} />)}
                 </div>
             </div>
 
             <div className={styles.zoneActions}>
-                {props.boundary.type === 'polygon' && (
-                    <Button text={t('map.addSchedule')} style='secondary' onClick={() => console.log('Add schedule')} />
+                {props.boundary.type === 'polygon' && !props.isGen4 && (
+                    <Button text={t('map.cleanZone', 'Clean zone')} style='primary' onClick={() => props.onCleanZone(props.boundary as Zone)} />
                 )}
                 <Button text={t('common.edit')} style='primary' onClick={() => props.editBoundary(props.boundary.id)} />
                 <Button text={t('common.delete')} style='fail' onClick={() => props.deleteBoundary(props.boundary.id)} />

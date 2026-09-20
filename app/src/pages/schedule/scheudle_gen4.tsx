@@ -12,15 +12,12 @@ import { CleaningMode, CleaningNavigationMode } from '../../types/neato/gen3/sta
 import { Http } from '../../http'
 import { useApp } from '../../context/useApp'
 import { RobotDay } from '../../types/neato/gen3/api'
-import type { UseState } from '../map/types'
+import type { UseState, Zone, NoGoLine } from '../map/types'
 import { GEN4_COMMANDS } from '../../http/gen4'
 import { Neato } from '../../types'
-import type { CommandEvent } from '../../types/neato/gen4'
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
 import { dayKey } from '../../i18n/days'
-
-// For now schduling will be only for cleaning.start for ONE run, later on scheduling can be more advanced
 
 function getDayText(days: Neato.Gen4.Days[], t: TFunction) {
     const set = new Set(days);
@@ -38,16 +35,33 @@ export default () => {
     const [scheduleFormNavigationMode, setScheduleFormNavigationMode] = useState<Neato.Gen4.CleaningNavigationMode>()
     const [scheduleFormCleaningMode, setScheduleCleaningMode] = useState<Neato.Gen4.CleaningMode>()
 
-    // const [schduleRuns, setScheduleRuns] = useState<Neato.Gen4.Run[]>()
     const [scheduleForm, setScheduleForm] = useState<Omit<Neato.Gen4.CommandEvent, "command">>({
         enabled: true,
         days: [],
         time: '',
     })
 
-    const { robot, persistentMaps } = useApp()
+    const { robot, promotedFloorplan } = useApp()
+
+    // The schedule targets the currently promoted map (derived in AppContext): its
+    // zones/no-go are what the user picks from, and its rank_id is what each run references.
+    const promotedMap = promotedFloorplan
+
+    const [boundaries, setBoundaries] = useState<(NoGoLine | Zone)[]>([])
+    const [selectedZones, setSelectedZones] = useState<Set<string>>(new Set())
+    // Per-event no-go apply flag. The floorplan has ONE no-go union (firmware limit),
+    // so a schedule can only say "apply the map's no-go set" or "ignore it" - not pick
+    // a per-event subset. This mirrors the event's stored runs[].map.nogo_enabled and
+    // is what the run is saved with; it never mutates the map's shared boundaries.
+    const [nogoEnabled, setNogoEnabled] = useState<boolean>(true)
+
+    const cleaningZones = boundaries.filter(b => (b as Zone).function === 'cleaning')
+    const noGoLines = boundaries.filter(b => b.type === 'polyline' || (b as Zone).function === 'nogo')
 
     const setFormFromEvent = (event: Neato.Gen4.CommandEvent) => {
+        const zoneIds = event.command.runs.map(r => r.map?.track_id).filter(Boolean) as string[]
+        setSelectedZones(new Set(zoneIds));
+        setNogoEnabled(event.command.runs[0]?.map?.nogo_enabled ?? true);
         setScheduleForm(event);
         setScheduleFormNavigationMode(event.command.runs[0].settings.navigation_mode);
         setScheduleCleaningMode(event.command.runs[0].settings.mode);
@@ -55,6 +69,8 @@ export default () => {
     }
 
     const openCleanForm = () => {
+        setSelectedZones(new Set());
+        setNogoEnabled(true);
         setScheduleForm({
             enabled: true,
             days: [],
@@ -64,7 +80,6 @@ export default () => {
         setScheduleCleaningMode(undefined);
         setDrawerOpen(true)
     }
-
 
     const getSchedule = () => {
         GEN4_COMMANDS.getSchedule(robot.serial).then(res => {
@@ -76,6 +91,28 @@ export default () => {
         if (!robot) return;
         getSchedule();
     }, [robot])
+
+    // Load the promoted map's boundaries so the user can pick zones / toggle no-go.
+    useEffect(() => {
+        if (!robot || !promotedMap) { setBoundaries([]); return }
+        Http.getBoundaries(robot.serial, promotedMap.id).then(res => setBoundaries(res.data))
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [robot, promotedMap?.id])
+
+    const toggleZoneSelect = (id: string) => {
+        setSelectedZones(prev => {
+            const next = new Set(prev)
+            if (next.has(id)) next.delete(id); else next.add(id)
+            return next
+        })
+    }
+
+    const targetText = (event: Neato.Gen4.CommandEvent) => {
+        const ids = event.command.runs.map(r => r.map?.track_id).filter(Boolean) as string[]
+        if (ids.length === 0) return t('schedule.wholeMap', 'Whole map')
+        const names = ids.map(id => boundaries.find(b => b.id === id)?.name).filter(Boolean)
+        return names.length ? names.join(', ') : `${ids.length} ${t('map.zone', 'zone')}`
+    }
 
     const removeEvent = (id: string) => {
         if (!schedule) return;
@@ -96,20 +133,6 @@ export default () => {
         <div className={styles.container}>
 
             <div className={styles.featureList}>
-                {/* <div className={styles.item} style={{ background: 'var(--accent-soft)' }}>
-                    <div className={styles.info}>
-                        <span>Schedule</span>
-                    </div>
-                    <Input type="switch" skipSection={true} value={schedule.enabled} onChange={() => {
-                        console.log('schedule', schedule)
-                        let cmd = GEN4_COMMANDS.enableSchedule;
-                        if (schedule.enabled) cmd = GEN4_COMMANDS.disableSchedule;
-                        cmd(robot.serial).then(() => getSchedule());
-                    }} />
-                </div>
-
-                <hr style={{ width: '90%' }} /> */}
-
                 <div className={styles.item} style={{ justifyContent: 'center', textAlign: 'center', background: 'var(--accent-soft)' }} onClick={() => openCleanForm()}>
                     <div className={styles.info}>
                         <span>{t('schedule.newSchedule')}</span>
@@ -120,7 +143,7 @@ export default () => {
                 {schedule.events?.map((item, i) => (
                     <div key={i} className={styles.item} onClick={() => setFormFromEvent(item)}>
                         <div className={styles.info}>
-                            <span>{item.time}</span>
+                            <span>{item.time} - {targetText(item)}</span>
                             <span className={styles.type}>{t('schedule.gen4Summary', { when: getDayText(item.days, t), mode: item.command.runs[0].settings.mode, navigation: item.command.runs[0].settings.navigation_mode })}</span>
                         </div>
                         <Input type="switch" skipSection={true} value={item.enabled} onChange={() => {
@@ -129,7 +152,7 @@ export default () => {
                         }} />
                     </div>
                 ))}
-                {persistentMaps?.length === 0 && (
+                {schedule.events?.length === 0 && (
                     <span style={{ textAlign: 'center' }}>{t('schedule.noSchedules')}</span>
                 )}
             </div>
@@ -188,14 +211,43 @@ export default () => {
                         value={scheduleForm.time}
                         onChange={(time) => updateForm(setScheduleForm, { time })} />
 
-                    {/* <Input
-                        type="text"
-                        label="boundaryId"
-                        value={scheduleForm.boundaryId}
-                        onChange={(boundaryId) => updateForm(SetScheduleForm, { boundaryId })} /> */}
+                    {promotedMap && cleaningZones.length > 0 && (
+                        <div>
+                            <div style={{ fontWeight: 600, marginTop: 12, marginBottom: 4 }}>{t('schedule.zonesToClean', 'Zones to clean (none = whole map)')}</div>
+                            {cleaningZones.map(z => (
+                                <div key={z.id} className={styles.item}>
+                                    <div className={styles.info}><span>{z.name}</span></div>
+                                    <Input type="switch" skipSection={true} value={selectedZones.has(z.id)} onChange={() => toggleZoneSelect(z.id)} />
+                                </div>
+                            ))}
+                        </div>
+                    )}
 
-                    <Button text={t('common.save')} style='success' onClick={() => {
+                    {promotedMap && noGoLines.length > 0 && (
+                        <div className={styles.item}>
+                            <div className={styles.info}><span>{t('schedule.noGoLines', 'No-go lines')}</span></div>
+                            <Input type="switch" skipSection={true} value={nogoEnabled} onChange={() => setNogoEnabled(v => !v)} />
+                        </div>
+                    )}
+
+                    <Button text={t('common.save')} style='success' onClick={async () => {
                         if (!scheduleFormNavigationMode || !scheduleFormCleaningMode) return;
+
+                        const settings = {
+                            navigation_mode: scheduleFormNavigationMode,
+                            mode: scheduleFormCleaningMode,
+                        }
+
+                        // Same apply as the map menu: promote the map so the robot holds the
+                        // zone/no-go tracks the (autonomously-fired) schedule will reference.
+                        if (promotedMap) await Http.test(robot.serial, promotedMap.id)
+
+                        const rankId = promotedMap ? promotedMap.id : (null as any)
+                        const zoneIds = promotedMap ? cleaningZones.filter(z => selectedZones.has(z.id)).map(z => z.id) : []
+
+                        const runs: Neato.Gen4.SchduleRun[] = zoneIds.length > 0
+                            ? zoneIds.map(track_id => ({ settings, map: { rank_id: rankId, track_id, nogo_enabled: nogoEnabled } }))
+                            : [{ settings, map: { rank_id: rankId, track_id: null, nogo_enabled: nogoEnabled } }]
 
                         GEN4_COMMANDS.updateOrAddSchduledEvent(robot.serial, {
                             ...scheduleForm,
@@ -203,23 +255,13 @@ export default () => {
                                 ability: "cleaning.start",
                                 auto_localization: false, // unused
                                 force_floorplan: false,
-                                runs: [{
-                                    settings: {
-                                        navigation_mode: scheduleFormNavigationMode,
-                                        mode: scheduleFormCleaningMode,
-                                    },
-                                    map: {
-                                        rank_id: null as any,
-                                        track_id: null,
-                                        nogo_enabled: true
-                                    }
-                                }]
+                                runs,
                             }
                         }).finally(() => getSchedule())
                     }} />
 
                     {scheduleForm.id && (
-                        <Button text={t('common.delete')} style='fail' onClick={() => removeEvent(scheduleForm.id!)} /> // Allowed here because check on row above
+                        <Button text={t('common.delete')} style='fail' onClick={() => removeEvent(scheduleForm.id!)} />
                     )}
                 </div>
 

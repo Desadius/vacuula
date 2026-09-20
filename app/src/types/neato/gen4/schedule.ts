@@ -38,7 +38,7 @@ export interface SchduleRun {
 
 export interface RunMap {
     rank_id:      string;
-    track_id:     null;
+    track_id:     string | null;
     nogo_enabled: boolean;
 }
 

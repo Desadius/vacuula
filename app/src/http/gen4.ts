@@ -87,7 +87,7 @@ function demoteFloorplan(serial: string, id: string) {
 }
 
 
-function startCleaning(serial: string, mode: Neato.Gen4.CleaningMode, navigationMode: Neato.Gen4.CleaningNavigationMode, trackId?: string | null, rankId?: string | null) {
+function startCleaning(serial: string, mode: Neato.Gen4.CleaningMode, navigationMode: Neato.Gen4.CleaningNavigationMode, trackId?: string | null, rankId?: string | null, nogoEnabled: boolean = true) {
     // Zone cleaning needs a floorplan rank_id AND the zone uploaded to the robot
     // as a track (maps.save_track) - not wired yet (scope B). Guard so clicking a
     // zone doesn't fall through to a full exploration clean.
@@ -97,8 +97,10 @@ function startCleaning(serial: string, mode: Neato.Gen4.CleaningMode, navigation
     }
     // rankId set  -> clean that persistent floorplan (track_id null = whole map).
     // rankId null -> non-persistent / first-map exploration clean (map: null).
+    // nogo_enabled is a per-run flag: the no-go geometry always lives on the
+    // floorplan; this only decides whether THIS run applies it.
     const map = rankId
-        ? { rank_id: rankId, track_id: trackId ?? null, nogo_enabled: true }
+        ? { rank_id: rankId, track_id: trackId ?? null, nogo_enabled: nogoEnabled }
         : null
     return Http.sendCmd(serial, {
         ability: "cleaning.start",
@@ -113,6 +115,26 @@ function startCleaning(serial: string, mode: Neato.Gen4.CleaningMode, navigation
     })
 }
 
+function startCleaningZones(serial: string, mode: Neato.Gen4.CleaningMode, navigationMode: Neato.Gen4.CleaningNavigationMode, rankId: string, zoneIds: string[], nogoEnabled: boolean = true) {
+    // One run per selected zone (native multi-zone protocol); whole map if none.
+    // nogo_enabled is per-run: the no-go geometry always lives on the floorplan;
+    // this flag only decides whether these runs apply it.
+    const runs = zoneIds.length > 0
+        ? zoneIds.map(track_id => ({
+            map: { rank_id: rankId, track_id, nogo_enabled: nogoEnabled },
+            settings: { mode, navigation_mode: navigationMode },
+        }))
+        : [{
+            map: { rank_id: rankId, track_id: null, nogo_enabled: nogoEnabled },
+            settings: { mode, navigation_mode: navigationMode },
+        }]
+    return Http.sendCmd(serial, {
+        ability: "cleaning.start",
+        force_floorplan: false,
+        runs,
+    })
+}
+
 function cleaningInfo(serial: string) {
     return Http.sendCmd<RobotBaseResponse<Neato.Gen4.Cleaning>>(serial, {
         ability: "cleaning.show",
@@ -122,6 +144,7 @@ function cleaningInfo(serial: string) {
 
 export const GEN4_COMMANDS = {
     startCleaning,
+    startCleaningZones,
     stopCleaning,
     pauseCleaning,
     resumeCleaning,

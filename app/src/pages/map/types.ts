@@ -11,6 +11,7 @@ export interface Zone {
     vertices: Point[]
     enabled: boolean
     function: 'nogo' | 'cleaning' // only gen4, TODO: better system to separate them but meh
+    deleted?: boolean // marks this boundary for explicit removal on next postBoundaries
 }
 
 export interface SetZone extends Zone {
@@ -24,6 +25,7 @@ export interface NoGoLine {
     type: 'polyline'
     vertices: Point[]
     enabled: boolean
+    deleted?: boolean // marks this boundary for explicit removal on next postBoundaries
 }
 
 export interface Offset {

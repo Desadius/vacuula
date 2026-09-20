@@ -86,14 +86,32 @@ export default function MapCanvas({
         if (mode === 'boundary-edit' && !hasMoved) addPointAtCrosshair()
     }
 
+    // Desktop parity: the touch handlers above drive point-adding and the
+    // "close polygon" proximity flag; mirror them for the mouse so drawing and
+    // closing a zone work with a pointer, not just a finger.
+    const onMouseMove = (e: React.MouseEvent) => {
+        canvasHandlers.onMouseMove(e)
+        if (currentLinePoints.length > 1 && mapSize) {
+            const coords = getCrosshairWorldCoords(canvasRef, offset, zoom, mapSize)
+            const [fx, fy] = currentLinePoints[0]
+            const distance = Math.sqrt((coords[0] - fx) ** 2 + (coords[1] - fy) ** 2)
+            setShowCloseAsPolygon(distance < DRAWING.CLOSE_THRESHOLD)
+        }
+    }
+
+    const onMouseUp = (e: React.MouseEvent) => {
+        canvasHandlers.onMouseUp(e)
+        if (mode === 'boundary-edit' && !hasMoved) addPointAtCrosshair()
+    }
+
     return (
         <>
             <canvas
                 ref={canvasRef}
                 className={styles.canvas}
                 onMouseDown={canvasHandlers.onMouseDown}
-                onMouseMove={canvasHandlers.onMouseMove}
-                onMouseUp={canvasHandlers.onMouseUp}
+                onMouseMove={onMouseMove}
+                onMouseUp={onMouseUp}
                 onMouseLeave={canvasHandlers.onMouseLeave}
                 onWheel={canvasHandlers.onWheel}
                 onTouchStart={canvasHandlers.onTouchStart}

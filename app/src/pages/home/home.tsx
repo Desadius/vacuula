@@ -259,11 +259,14 @@ export default function Home() {
                                     // Both HOUSE and MAP use the map's persisted config for no-go:
                                     // the floorplan holds ONE no-go union (firmware limit), applied
                                     // iff any no-go line is currently enabled on the map.
-                                    let boundaries: any[] = []
+                                    // FAIL CLOSED: if the boundaries can't be loaded we don't know the
+                                    // no-go state, so we must not clean with keep-out lines silently off.
+                                    let boundaries: any[]
                                     try {
                                         boundaries = (await Http.getBoundaries(robot.serial, rankId)).data ?? []
                                     } catch (e) {
-                                        console.error('failed to load map boundaries for cleaning', e)
+                                        console.error('failed to load map boundaries; aborting clean (no-go state unknown)', e)
+                                        return;
                                     }
                                     const nogoActive = boundaries.some(b => !b.deleted && b.enabled && (b.type === 'polyline' || b.function === 'nogo'))
 
@@ -284,9 +287,13 @@ export default function Home() {
                                     try {
                                         await Http.test(robot.serial, rankId)
                                     } catch (e) {
-                                        console.error('apply zones/no-go before cleaning failed', e)
+                                        // The promote uploads the zone/no-go tracks the run references;
+                                        // without it the robot has stale/missing map data - abort.
+                                        console.error('apply zones/no-go before cleaning failed; aborting clean', e)
+                                        return;
                                     }
-                                    await new Promise(r => setTimeout(r, 1000)) // let the robot commit the promote
+                                    // Http.test resolves only after the robot has ACKNOWLEDGED the
+                                    // promote (server blocks on the reply) - no settle delay needed.
                                     GEN4_COMMANDS.startCleaningZones(robot.serial, gen4__cleaningMode, gen4__navigationMode, rankId, zoneIds, nogoActive)
                                 }
                             }}>

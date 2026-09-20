@@ -49,10 +49,16 @@ export default () => {
     const [mode, setMode] = useState<MapMode>('maps')
     const [returnFromEditMode, SetReturnFromEditMode] = useState<'boundaries' | 'boundary-info'>('boundaries')
     const [activeBoundaryId, setActiveBoundaryId] = useState<string | undefined>(undefined);
-    const [selectedZones, setSelectedZones] = useState<Set<string>>(new Set())
 
     const { robot } = useRobot()
-    const skipNextPostRef = useRef(false)
+    // Auto-save bookkeeping. `serverBoundariesRef` holds the exact array object
+    // last received from (or last confirmed by) the server; the save effect
+    // POSTs only when `boundaries` is a DIFFERENT object, i.e. the change came
+    // from the user. This replaces a single shared skip-flag whose outcome
+    // depended on effect ordering: in some render orders it let a redundant
+    // POST of freshly-loaded data go out, which could race an in-flight user
+    // POST and, if processed out of order, overwrite the user's toggle.
+    const serverBoundariesRef = useRef<(NoGoLine | Zone)[] | null>(null)
 
     const { data: persistentMaps, refresh: updatePersistentMaps } = usePersistentMaps()
 
@@ -90,11 +96,31 @@ export default () => {
     // Fetch boundaries when persistentMap changes
     useEffect(() => {
         if (!persistentMap) return
-        skipNextPostRef.current = true
+        // Start the new map from a known-empty, server-owned array so the save
+        // effect (which POSTs only when `boundaries` differs from the server
+        // object) does not fire for this reset.
+        const empty: (NoGoLine | Zone)[] = []
+        serverBoundariesRef.current = empty
+        setBoundaries(empty)
+        const accept = (data: (NoGoLine | Zone)[]) => {
+            // MERGE, never overwrite: anything in local state at this point is a
+            // user edit made while the load was in flight (the list starts empty,
+            // so it cannot be anything else). Server data is the base and each
+            // local edit is upserted on top, so a late response can never wipe
+            // an edit. If nothing was edited, local is [] and merged === data.
+            setBoundaries(local => {
+                const merged = local.reduce((acc, b) => upsertPreserveOrder(acc, b), data)
+                // If no edits were merged, the result IS the server state; record
+                // that so the save effect stays quiet. Otherwise leave the ref on
+                // `data` so the merged result (which differs) gets POSTed.
+                serverBoundariesRef.current = local.length === 0 ? merged : data
+                return merged
+            })
+        }
         if (robot.type === RobotType.NeatoGen4) {
-            Http.getBoundaries(robot.serial, persistentMap).then(res => setBoundaries(res.data))
+            Http.getBoundaries(robot.serial, persistentMap).then(res => accept(res.data))
         } else {
-            GEN3_COMMANDS.getMapBoundaries(robot.serial, persistentMap).then(res => setBoundaries(res.data.data.boundaries))
+            GEN3_COMMANDS.getMapBoundaries(robot.serial, persistentMap).then(res => accept(res.data.data.boundaries))
         }
         setMode('boundaries')
     }, [persistentMap])
@@ -113,20 +139,27 @@ export default () => {
         updatePersistentMaps();
     }, [robot])
 
+    // Auto-save: every user edit (toggle, draw, rename, delete) lands in
+    // `boundaries` as a new array object; we POST it immediately. Loads from the
+    // server set `boundaries` to the very object stored in serverBoundariesRef,
+    // so they are recognised by identity and never re-POSTed.
     useEffect(() => {
         if (!persistentMap) return;
-        if (skipNextPostRef.current) {
-            skipNextPostRef.current = false
-            return
-        }
-        Http.postBoundaries(robot.serial, persistentMap, boundaries).then(() => {
-            // Once the server has persisted the removals, drop the tombstoned
-            // items from local state. Guard the resulting setBoundaries so it
-            // doesn't re-trigger a redundant POST.
-            if (boundaries.some(b => b.deleted)) {
-                skipNextPostRef.current = true
-                setBoundaries(prev => prev.filter(b => !b.deleted))
-            }
+        if (boundaries === serverBoundariesRef.current) return;   // server-originated, nothing to save
+        const toSave = boundaries
+        Http.postBoundaries(robot.serial, persistentMap, toSave).then(() => {
+            // Only mark as confirmed if no further edit happened while the POST
+            // was in flight; a newer edit will run its own save.
+            setBoundaries(current => {
+                if (current !== toSave) return current
+                // Drop tombstoned items now the server has persisted the removal;
+                // the pruned array becomes the confirmed server state.
+                const pruned = toSave.some(b => b.deleted) ? toSave.filter(b => !b.deleted) : toSave
+                serverBoundariesRef.current = pruned
+                return pruned
+            })
+        }).catch(e => {
+            console.error('failed to save map boundaries', e)
         });
     }, [boundaries]);
 
@@ -178,33 +211,14 @@ export default () => {
         update(prev => ({ ...prev, ...patch }))
     }
 
-    const toggleNoGoLine = (item: NoGoLine | Zone) => {
+    // Toggle a zone's or no-go line's `enabled` flag. This is PERSISTED (the
+    // auto-save effect POSTs it) and is the floorplan's configuration:
+    //  - zone enabled   = included in the map's default clean (home Map+Start)
+    //  - no-go enabled  = its geometry is part of the map's one no-go union
+    // Manual cleaning is started from the home screen (Map+Start), which reads
+    // exactly these flags, so there is no separate per-run selection here.
+    const toggleEnabled = (item: NoGoLine | Zone) => {
         setBoundaries(prev => upsertPreserveOrder(prev, { ...item, enabled: !item.enabled }));
-    };
-
-    const toggleZoneSelect = (id: string) => {
-        setSelectedZones(prev => {
-            const next = new Set(prev)
-            if (next.has(id)) next.delete(id); else next.add(id)
-            return next
-        })
-    };
-
-    const startCleaningSelected = async () => {
-        if (!persistentMap) return
-        try {
-            await Http.test(robot.serial, persistentMap)   // apply: push map + active no-go + zones (with target-marking)
-        } catch (e) {
-            console.error('apply zones/no-go before cleaning failed', e)
-        }
-        await new Promise(r => setTimeout(r, 1000))         // let the robot commit the promote before cleaning.start
-        const zoneIds = boundaries.filter(b => !b.deleted && b.type === 'polygon' && b.function === 'cleaning' && selectedZones.has(b.id)).map(b => b.id)
-        // No-go is applied for this run iff any no-go line is currently enabled on
-        // the map. The geometry is always uploaded (server keeps the shared track
-        // whole); this flag only decides whether THIS manual run obeys it, so it
-        // never disturbs schedules that reference the same no-go track.
-        const nogoActive = boundaries.some(b => !b.deleted && (b.type === 'polyline' || (b as Zone).function === 'nogo') && b.enabled)
-        GEN4_COMMANDS.startCleaningZones(robot.serial, Neato.Gen4.CleaningMode.ECO, Neato.Gen4.CleaningNavigationMode.GENTLE, persistentMap, zoneIds, nogoActive)
     };
 
     const deleteBoundary = (id: string) => {
@@ -386,7 +400,6 @@ export default () => {
                         </div>
                         <hr />
                         <div className={styles.buttonContainer}>
-                            {robot.type === RobotType.NeatoGen4 && <Button text={t('map.startCleaning', 'Start cleaning')} style='primary' onClick={startCleaningSelected} />}
                             <Button text={t('map.addFeature')} style='primary' onClick={() => openEdit(uuidv4())} />
                         </div>
 
@@ -399,8 +412,11 @@ export default () => {
                                             {item.type === 'polygon' ? t('map.zone') : t('map.noGoLine')}
                                         </span>
                                     </div>
-                                    {(item.type === 'polyline' || (item as Zone).function === 'nogo') && (<Input type="switch" skipSection={true} value={item.enabled} onChange={() => toggleNoGoLine(item)} />)}
-                                    {robot.type === RobotType.NeatoGen4 && (item as Zone).function === 'cleaning' && (<div onClick={(e) => e.stopPropagation()}><Input type="switch" skipSection={true} value={selectedZones.has(item.id)} onChange={() => toggleZoneSelect(item.id)} /></div>)}
+                                    {/* Persisted `enabled` toggle for every zone and no-go line (auto-saved).
+                                        Zone: included in the map's default clean. No-go: part of the no-go union. */}
+                                    {(item.type === 'polyline' || (item as Zone).function === 'nogo' || (robot.type === RobotType.NeatoGen4 && (item as Zone).function === 'cleaning')) && (
+                                        <div onClick={(e) => e.stopPropagation()}><Input type="switch" skipSection={true} value={item.enabled} onChange={() => toggleEnabled(item)} /></div>
+                                    )}
                                     {robot.type === RobotType.NeatoGen3 && item.type === 'polygon' && (<div onClick={(e) => e.stopPropagation()}><Button style='primary' text={t('map.cleanZone', 'Clean zone')} onClick={() => GEN3_COMMANDS.startCleaningZone(robot.serial, item.id, CleaningMode.ECO, CleaningNavigationMode.EXTRA_CARE)} /></div>)}
                                 </div>
                             ))}

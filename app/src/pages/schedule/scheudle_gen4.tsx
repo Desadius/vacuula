@@ -55,7 +55,10 @@ export default () => {
     // is what the run is saved with; it never mutates the map's shared boundaries.
     const [nogoEnabled, setNogoEnabled] = useState<boolean>(true)
 
-    const cleaningZones = boundaries.filter(b => (b as Zone).function === 'cleaning')
+    // ALL zones of the floorplan are selectable: the server uploads every zone's
+    // track on promote (regardless of `enabled`), so each schedule event can pick
+    // any subset independently of the map's default (home Map+Start) selection.
+    const cleaningZones = boundaries.filter(b => (b as Zone).function === 'cleaning' && !b.deleted)
     const noGoLines = boundaries.filter(b => b.type === 'polyline' || (b as Zone).function === 'nogo')
 
     const setFormFromEvent = (event: Neato.Gen4.CommandEvent) => {
@@ -240,7 +243,18 @@ export default () => {
 
                         // Same apply as the map menu: promote the map so the robot holds the
                         // zone/no-go tracks the (autonomously-fired) schedule will reference.
-                        if (promotedMap) await Http.test(robot.serial, promotedMap.id)
+                        // Http.test resolves only after the robot has ACKNOWLEDGED the promote
+                        // (the server blocks on the robot's reply), so the tracks are committed
+                        // before we save a schedule that references them. Abort on failure: a
+                        // schedule pointing at un-uploaded tracks would silently misfire.
+                        if (promotedMap) {
+                            try {
+                                await Http.test(robot.serial, promotedMap.id)
+                            } catch (e) {
+                                console.error('apply zones/no-go before saving schedule failed; aborting save', e)
+                                return
+                            }
+                        }
 
                         const rankId = promotedMap ? promotedMap.id : (null as any)
                         const zoneIds = promotedMap ? cleaningZones.filter(z => selectedZones.has(z.id)).map(z => z.id) : []

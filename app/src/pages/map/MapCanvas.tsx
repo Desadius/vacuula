@@ -99,8 +99,9 @@ export default function MapCanvas({
         }
     }
 
-    const onMouseUp = (e: React.MouseEvent) => {
-        canvasHandlers.onMouseUp(e)
+    const onMouseUp = () => {
+        // handleMouseUp is zero-arg (useCanvasViewport) - it only resets drag state.
+        canvasHandlers.onMouseUp()
         if (mode === 'boundary-edit' && !hasMoved) addPointAtCrosshair()
     }
 

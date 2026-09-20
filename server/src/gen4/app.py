@@ -1,6 +1,6 @@
 from re import search
 from gen3.commands import send_chunk, build_command, build_heartbeat # TODO
-from state import robot_connections, client_connections, pending_requests
+from state import robot_connections, client_connections, pending_requests, PendingRequest
 from db import get_session, db_commit
 from models.persistent_map import Boundary, FloorPlan
 from models.robot import Robot
@@ -12,6 +12,11 @@ import time
 import os
 
 from gen4.handlers import robot_send_request, send_json
+
+# Longest wait for the robot to acknowledge maps.promote_floorplan. The promote
+# carries multi-megabyte map blobs and the robot has been observed taking a few
+# seconds to reply, so this is deliberately generous but still bounded.
+PROMOTE_TIMEOUT_S = 60
 
 from typing import TYPE_CHECKING, Sequence
 if TYPE_CHECKING:
@@ -204,11 +209,45 @@ def _mark_targets_inside_zones(real_blob, cleaning_zones, floorplan):
         if not raw.startswith(b"P5"):
             return real_blob
         W, H = floorplan.imgsize
-        pixels_offset = len(raw) - W * H
-        if pixels_offset < 4 or pixels_offset > 1024:
-            print("PROMOTE_PATCH: real.pgm size mismatch (offset=%d); skipping" % pixels_offset)
+        # PGM (P5) pixels are 1 byte/cell when maxval <= 255, else 2 bytes/cell
+        # big-endian (the firmware's zone maps are 16-bit, maxval=65535). Parse
+        # maxval from the header so both widths are handled. The header may
+        # carry '#' comment lines (the robot's real.pgm has a '# metadata:' line),
+        # so tokens are read with a real PGM tokenizer that skips comments, NOT a
+        # naive whitespace split. The pixel block is still located from the END
+        # of the buffer (len - W*H*bpp), which is robust to any header layout.
+        def _pgm_tokens(buf, n):
+            toks, i, L = [], 0, len(buf)
+            while len(toks) < n and i < L:
+                c = buf[i:i+1]
+                if c in b" \t\r\n":
+                    i += 1
+                elif c == b"#":
+                    j = buf.find(b"\n", i)
+                    i = L if j < 0 else j + 1
+                else:
+                    j = i
+                    while j < L and buf[j:j+1] not in b" \t\r\n#":
+                        j += 1
+                    toks.append(buf[i:j]); i = j
+            return toks
+        toks = _pgm_tokens(raw, 4)          # P5, width, height, maxval
+        if len(toks) < 4:
+            print("PROMOTE_PATCH: malformed PGM header %r; skipping" % toks)
             return real_blob
-        arr = _np.frombuffer(raw[pixels_offset:pixels_offset + W * H], dtype=_np.uint8).reshape(H, W).copy()
+        try:
+            maxval = int(toks[3])
+        except ValueError:
+            print("PROMOTE_PATCH: bad PGM maxval %r; skipping" % toks[3])
+            return real_blob
+        bpp = 2 if maxval > 255 else 1
+        dtype = _np.dtype(">u2") if bpp == 2 else _np.uint8
+        npix = W * H * bpp
+        pixels_offset = len(raw) - npix
+        if pixels_offset < 4 or pixels_offset > 1024:
+            print("PROMOTE_PATCH: real.pgm size mismatch (offset=%d, bpp=%d); skipping" % (pixels_offset, bpp))
+            return real_blob
+        arr = _np.frombuffer(raw[pixels_offset:pixels_offset + npix], dtype=dtype).reshape(H, W).copy()
         changed = 0
         for boundary in cleaning_zones:
             if boundary.type != "polygon" or len(boundary.vertices) < 3:
@@ -277,10 +316,14 @@ def get_test(req: RouterHandler, serial: str, map_id: str) -> None:
     if DEBUG_DUMP:
         os.makedirs(DEBUG_DUMP_DIR, exist_ok=True)
 
-    # Cleaning zones respect `enabled` (a disabled zone should not be cleaned or
-    # target-marked). The no-go geometry is ALWAYS built from every no-go line so
-    # the shared track stays whole regardless of the per-run nogo_enabled flag.
-    cleaning_zones = [b for b in boundaries if b.function == "cleaning" and b.enabled]
+    # ALL cleaning-zone tracks are uploaded, regardless of `enabled`, so any zone
+    # is a valid target for a schedule (each event picks its own subset via
+    # track_id). `enabled` on a zone only means "included in the map's default
+    # clean" (home Map+Start) - it is a selection, not existence on the robot.
+    # Likewise the no-go geometry is ALWAYS built from every no-go line so the
+    # shared track stays whole regardless of the per-run nogo_enabled flag.
+    # Target-marking covers all zones for the same reason.
+    cleaning_zones = [b for b in boundaries if b.function == "cleaning"]
     nogo_zones     = [b for b in boundaries if b.function == "nogo"]
 
     nogo_img = Image.new("L", floorplan.imgsize, BG_PIXEL)
@@ -347,14 +390,44 @@ def get_test(req: RouterHandler, serial: str, map_id: str) -> None:
             if DEBUG_DUMP:
                 print(payload)
 
-            robot_send_request(robot_connections[serial], payload)
+            # The promote uploads the rank, no-go and zone tracks that every
+            # subsequent cleaning.start / scheduling.update references. Callers
+            # (manual clean, home button, schedule save) must not proceed until
+            # the robot has actually COMMITTED it, so this request blocks on the
+            # robot's reply instead of returning as soon as the bytes are sent.
+            # Same PendingRequest slot mechanism as post_robot_command.
+            if serial not in robot_connections:
+                req.send_bad_request("Robot not connected")
+                return
+            slot = PendingRequest()
+            try:
+                # registers the slot BEFORE sending so a fast reply can't be lost
+                req_id = robot_send_request(robot_connections[serial], payload, slot)
+            except Exception as _e:
+                print("PROMOTE: failed to send to robot: %s: %s" % (type(_e).__name__, _e))
+                req.send_error_response(502, "Failed to send promote to robot")
+                return
 
+            slot.event.wait(PROMOTE_TIMEOUT_S)
+            pending_requests.pop(str(req_id), None)
+            if not slot.event.is_set():
+                print("PROMOTE: robot did not acknowledge within %ss" % PROMOTE_TIMEOUT_S)
+                req.send_error_response(504, "Robot did not acknowledge promote in time")
+                return
+            if slot.status != 200:
+                print("PROMOTE: robot rejected promote: status=%s body=%s" % (slot.status, slot.content))
+                req.send_error_response(502, "Robot rejected promote (status %s)" % slot.status)
+                return
+
+            # Only now - after the robot has confirmed - do we record the
+            # floorplan as promoted, so the local DB can never claim a promote
+            # the robot doesn't actually hold.
             with get_session() as session:
                 floor_plan = session.get(FloorPlan, map_id)
 
                 if floor_plan is None:
-                    # TODO return error
-                    raise ValueError(f"Floor plan {map_id} not found")
+                    req.send_not_found(f"Floor plan {map_id} not found")
+                    return
 
                 session.execute(
                     update(FloorPlan)

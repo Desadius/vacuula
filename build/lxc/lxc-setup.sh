@@ -97,33 +97,36 @@ install_deps() {
                 curl \
                 ca-certificates \
                 openssl \
-                xz-utils
+                xz-utils \
+                uv
             ;;
         dnf)
             dnf -y install \
                 curl \
                 ca-certificates \
                 openssl \
-                xz
+                xz \
+                uv
             ;;
         zypper)
             zypper --non-interactive install --no-recommends \
                 curl \
                 ca-certificates \
                 openssl \
-                xz
+                xz \
+                uv
             ;;
         yum)
-            yum -y install curl ca-certificates openssl xz
+            yum -y install curl ca-certificates openssl xz uv
             ;;
         microdnf)
-            microdnf install -y curl ca-certificates openssl xz
+            microdnf install -y curl ca-certificates openssl xz uv
             ;;
         apk)
-            apk add --no-cache curl ca-certificates openssl xz
+            apk add --no-cache curl ca-certificates openssl xz uv
             ;;
         pacman)
-            pacman -Sy --noconfirm curl ca-certificates openssl xz
+            pacman -Sy --noconfirm curl ca-certificates openssl xz uv
             ;;
     esac
 }

@@ -4,33 +4,20 @@ set -euxo pipefail
 # ---------------------------------------------------------------------------
 # Detect package manager
 # ---------------------------------------------------------------------------
+set +x
 PKG_MANAGER=""
-
-if [ -r /etc/os-release ]; then
-    . /etc/os-release
-fi
-
-case " ${ID:-} ${ID_LIKE:-} " in
-    *debian*|*ubuntu*)        PKG_MANAGER="apt-get" ;;
-    *fedora*|*rhel*|*centos*) PKG_MANAGER="dnf"     ;;
-    *suse*|*opensuse*)        PKG_MANAGER="zypper"  ;;
-esac
-
-# Fallback: probe for binaries (covers derivatives, minimal images, etc.)
-if [ -z "$PKG_MANAGER" ]; then
-    for pm in apt-get dnf zypper yum microdnf apk pacman; do
-        if command -v "$pm" >/dev/null 2>&1; then
-            PKG_MANAGER="$pm"
-            break
-        fi
-    done
-fi
+for pm in apt-get zypper dnf yum microdnf apk pacman; do
+  if command -v "$pm" >/dev/null 2>&1; then
+    PKG_MANAGER="$pm"
+    break
+  fi
+done
 
 if [ -z "$PKG_MANAGER" ]; then
-    echo "Error: no supported package manager found" >&2
-    exit 1
+  echo "Error: no supported package manager found" >&2
+  exit 1
 fi
-
+set -x
 echo "Using package manager: $PKG_MANAGER"
 # ---------------------------------------------------------------------------
 

@@ -1,6 +1,39 @@
 #!/bin/bash
 set -euxo pipefail
 
+# ---------------------------------------------------------------------------
+# Detect package manager
+# ---------------------------------------------------------------------------
+PKG_MANAGER=""
+
+if [ -r /etc/os-release ]; then
+    . /etc/os-release
+fi
+
+case " ${ID:-} ${ID_LIKE:-} " in
+    *debian*|*ubuntu*)        PKG_MANAGER="apt-get" ;;
+    *fedora*|*rhel*|*centos*) PKG_MANAGER="dnf"     ;;
+    *suse*|*opensuse*)        PKG_MANAGER="zypper"  ;;
+esac
+
+# Fallback: probe for binaries (covers derivatives, minimal images, etc.)
+if [ -z "$PKG_MANAGER" ]; then
+    for pm in apt-get dnf zypper yum microdnf apk pacman; do
+        if command -v "$pm" >/dev/null 2>&1; then
+            PKG_MANAGER="$pm"
+            break
+        fi
+    done
+fi
+
+if [ -z "$PKG_MANAGER" ]; then
+    echo "Error: no supported package manager found" >&2
+    exit 1
+fi
+
+echo "Using package manager: $PKG_MANAGER"
+# ---------------------------------------------------------------------------
+
 ROOT_DIR="$(realpath "$(dirname "$0")/../..")"
 INSTALL_DIR="/srv/vacuula"
 BACKUP_DIR="/srv/vacuula-backups"
@@ -69,13 +102,46 @@ echo "Installing Vacuula version: $APP_VERSION"
 
 sleep 1
 
-# System dependencies
-apt-get update
-apt-get install -y \
-    curl \
-    ca-certificates \
-    openssl \
-    xz-utils
+install_deps() {
+    case "$PKG_MANAGER" in
+        apt-get)
+            apt-get update
+            apt-get install -y --no-install-recommends \
+                curl \
+                ca-certificates \
+                openssl \
+                xz-utils
+            ;;
+        dnf)
+            dnf -y install \
+                curl \
+                ca-certificates \
+                openssl \
+                xz
+            ;;
+        zypper)
+            zypper --non-interactive install --no-recommends \
+                curl \
+                ca-certificates \
+                openssl \
+                xz
+            ;;
+        yum)
+            yum -y install curl ca-certificates openssl xz
+            ;;
+        microdnf)
+            microdnf install -y curl ca-certificates openssl xz
+            ;;
+        apk)
+            apk add --no-cache curl ca-certificates openssl xz
+            ;;
+        pacman)
+            pacman -Sy --noconfirm curl ca-certificates openssl xz
+            ;;
+    esac
+}
+
+install_deps
 
 # uv
 if ! command -v uv >/dev/null 2>&1; then

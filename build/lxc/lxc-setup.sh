@@ -58,11 +58,11 @@ NODE_DIR="/opt/node-build"
 
 install_node() {
     local arch
-    case "$(dpkg --print-architecture)" in
-        amd64) arch="x64" ;;
-        arm64) arch="arm64" ;;
-        armhf) arch="armv7l" ;;
-        *) echo "Unsupported architecture: $(dpkg --print-architecture)" >&2; exit 1 ;;
+    case "$(uname -m)" in
+        x86_64|amd64)  arch="x64" ;;
+        aarch64|arm64) arch="arm64" ;;
+        armv7l|armv8l) arch="armv7l" ;;
+        *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
     esac
 
     local name="node-v${NODE_VERSION}-linux-${arch}"
